@@ -1,0 +1,39 @@
+{
+    "name": "openwrite-mobile",
+    "version": "2.0.1",
+    "description": "OpenWrite AI Novel Writing Assistant - Mobile Edition",
+    "main": "index.js",
+    "scripts": {
+        "dev": "cd backend && python -m uvicorn main:app --reload --host 0.0.0.0 --port 4567",
+        "build": "npm run build:web && npm run build:capacitor",
+        "build:web": "echo 'Web assets ready in frontend/'",
+        "build:capacitor": "npx cap sync",
+        "build:android": "npx cap build android",
+        "build:ios": "npx cap build ios",
+        "add:android": "npx cap add android",
+        "add:ios": "npx cap add ios",
+        "open:android": "npx cap open android",
+        "open:ios": "npx cap open ios",
+        "setup": "npm install && npm run setup:backend && npm run setup:capacitor",
+        "setup:backend": "cd backend && pip install -r requirements.txt",
+        "setup:capacitor": "npx cap init openwrite-mobile com.openwrite.mobile --web-dir frontend"
+    },
+    "dependencies": {
+        "@capacitor/android": "^6.0.0",
+        "@capacitor/core": "^6.0.0",
+        "@capacitor/ios": "^6.0.0"
+    },
+    "devDependencies": {
+        "@capacitor/cli": "^6.0.0"
+    },
+    "keywords": [
+        "novel",
+        "writing",
+        "ai",
+        "openwrite",
+        "mobile",
+        "app"
+    ],
+    "author": "OpenWrite Community",
+    "license": "Apache-2.0"
+}
