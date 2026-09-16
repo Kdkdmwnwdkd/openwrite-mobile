@@ -6,10 +6,10 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.0.1',
+    VERSION: '2.1.0',
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
-    DB_VERSION: 1
+    DB_VERSION: 2
 };
 
 // ===== IndexedDB Store =====
@@ -34,6 +34,16 @@ const db = {
                 if (!db.objectStoreNames.contains('messages')) {
                     const ms = db.createObjectStore('messages', { keyPath: 'id', autoIncrement: true });
                     ms.createIndex('sessionId', 'sessionId', { unique: false });
+                }
+                // v2: 技能、审查记录、风格模板
+                if (!db.objectStoreNames.contains('skills')) {
+                    db.createObjectStore('skills', { keyPath: 'id' });
+                }
+                if (!db.objectStoreNames.contains('reviews')) {
+                    db.createObjectStore('reviews', { keyPath: 'id' });
+                }
+                if (!db.objectStoreNames.contains('templates')) {
+                    db.createObjectStore('templates', { keyPath: 'id' });
                 }
             };
         });
@@ -110,7 +120,7 @@ const settings = {
 
 // ===== AI API Client =====
 const ai = {
-    async chat(messages, onStream = null) {
+    async chat(messages, onStream = null, maxTokens = 4000) {
         const config = await settings.getModelConfig();
         if (!config.apiKey) {
             throw new Error('请先配置 API Key');
@@ -123,7 +133,7 @@ const ai = {
             messages: messages,
             stream: !!onStream,
             temperature: 0.7,
-            max_tokens: 4000
+            max_tokens: maxTokens
         };
 
         const response = await fetch(url, {
@@ -391,14 +401,24 @@ function navigateTo(page, params = {}) {
         novelDetail: () => renderNovelDetail(params.novelId),
         chapterEdit: () => renderChapterEdit(params.novelId, params.chapterNum),
         about: renderAbout,
-        chat: renderChat
+        chat: renderChat,
+        // 技能中心
+        skillCenter: renderSkillCenter,
+        skillDetail: () => renderSkillDetail(params.skillId),
+        skillUse: () => renderSkillUse(params.skillId, params.mode),
+        skillHistory: renderSkillHistory,
+        // 蒸馏
+        distill: renderDistill,
+        distillTemplates: renderDistillTemplates,
+        distillResult: () => renderDistillResult(params.templateId),
+        distillWrite: () => renderDistillWrite(params.templateId)
     };
 
     if (renderers[page]) renderers[page](view);
     window.scrollTo(0, 0);
 }
 
-// ===== Chat / Home Page (Match competitor) =====
+// ===== Chat / Home Page =====
 function renderChat(container) {
     ui.setPageTitle('新对话');
     ui.setHeaderActions(`
@@ -406,28 +426,57 @@ function renderChat(container) {
     `);
 
     container.innerHTML = `
-        <div style="padding: 16px;">
-            <!-- Quick Actions -->
+        <div style="padding: 16px; display: flex; flex-direction: column; min-height: calc(100vh - 140px);">
+            <!-- 功能工作台：蒸馏 / 技能审查 置顶（用户核心功能） -->
+            <div class="workbench">
+                <div class="workbench-title">创作者工作台</div>
+                <div class="workbench-grid">
+                    <div class="workbench-item primary" onclick="navigateTo('distill')">
+                        <div class="workbench-icon">✨</div>
+                        <div class="workbench-name">蒸馏</div>
+                        <div class="workbench-desc">学风格写</div>
+                    </div>
+                    <div class="workbench-item primary" onclick="navigateTo('skillCenter')">
+                        <div class="workbench-icon">🧪</div>
+                        <div class="workbench-name">去AI味</div>
+                        <div class="workbench-desc">审查润色</div>
+                    </div>
+                    <div class="workbench-item" onclick="showNameGenerator()">
+                        <div class="workbench-icon">📛</div>
+                        <div class="workbench-name">起名</div>
+                        <div class="workbench-desc">角色灵感</div>
+                    </div>
+                    <div class="workbench-item" onclick="showDeconstruct()">
+                        <div class="workbench-icon">🔎</div>
+                        <div class="workbench-name">拆解</div>
+                        <div class="workbench-desc">结构分析</div>
+                    </div>
+                    <div class="workbench-item" onclick="showRank()">
+                        <div class="workbench-icon">📊</div>
+                        <div class="workbench-name">扫榜</div>
+                        <div class="workbench-desc">市场风向</div>
+                    </div>
+                    <div class="workbench-item" onclick="showMemory()">
+                        <div class="workbench-icon">🧠</div>
+                        <div class="workbench-name">记忆</div>
+                        <div class="workbench-desc">写作设定</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 快捷操作（旧快捷按钮替代：小说/对话直达） -->
             <div style="display: flex; gap: 8px; overflow-x: auto; margin-bottom: 20px; padding-bottom: 4px;">
                 <div class="quick-action" onclick="navigateTo('bookshelf')">
-                    <span class="quick-icon">📝</span>
-                    <span>备忘录</span>
-                </div>
-                <div class="quick-action" onclick="showNameGenerator()">
-                    <span class="quick-icon">T</span>
-                    <span>起名</span>
-                </div>
-                <div class="quick-action" onclick="showDistill()">
-                    <span class="quick-icon">✨</span>
-                    <span>蒸馏</span>
-                </div>
-                <div class="quick-action" onclick="showDeconstruct()">
                     <span class="quick-icon">📖</span>
-                    <span>拆解</span>
+                    <span>我的小说</span>
                 </div>
-                <div class="quick-action" onclick="showRank()">
-                    <span class="quick-icon">📊</span>
-                    <span>扫榜</span>
+                <div class="quick-action" onclick="continueWriting()">
+                    <span class="quick-icon">✍️</span>
+                    <span>继续写作</span>
+                </div>
+                <div class="quick-action" onclick="navigateTo('skillHistory')">
+                    <span class="quick-icon">📜</span>
+                    <span>审查历史</span>
                 </div>
             </div>
 
@@ -442,38 +491,32 @@ function renderChat(container) {
                     <span class="action-arrow">›</span>
                 </div>
 
-                <div class="action-card" onclick="continueWriting()">
-                    <div class="action-icon">✍️</div>
-                    <div class="action-content">
-                        <div class="action-title">继续写作</div>
-                        <div class="action-desc">继续上一次的对话</div>
-                    </div>
-                    <span class="action-arrow">›</span>
-                </div>
-
                 <div class="action-card" onclick="showTutorial()">
                     <div class="action-icon">📖</div>
                     <div class="action-content">
                         <div class="action-title">使用教程</div>
-                        <div class="action-desc">查看使用手册</div>
+                        <div class="action-desc">快速上手：蒸馏、审查、写作</div>
                     </div>
                     <span class="action-arrow">›</span>
+                </div>
+            </div>
+
+            <!-- 对话记录 -->
+            <div id="chat-messages" class="chat-messages">
+                <div class="chat-welcome">
+                    <div class="chat-welcome-icon">✒️</div>
+                    <div class="chat-welcome-text">你好，我是你的 AI 写作搭子。<br>可以直接告诉我你的写作想法，也可以先用「蒸馏」学一本好书的风格。</div>
                 </div>
             </div>
         </div>
 
         <!-- Chat Input Area -->
         <div class="chat-input-area">
-            <div class="chat-tools">
-                <button class="chat-tool" onclick="webSearch()">🔍 联网搜索</button>
-            </div>
             <div class="chat-input-wrapper">
                 <textarea class="chat-textarea" id="chat-input" placeholder="写下你的故事..."></textarea>
                 <div class="chat-actions">
-                    <button class="chat-action-btn" onclick="useSkill()">@ 技能</button>
+                    <button class="chat-action-btn" onclick="openSkillPicker()">@ 技能</button>
                     <button class="chat-action-btn" onclick="attachFile()"># 文件</button>
-                    <button class="chat-action-btn" onclick="setDefault()">默认</button>
-                    <button class="chat-action-btn" onclick="useMemory()">记忆</button>
                     <button class="chat-action-btn" onclick="rollDice()">🎲</button>
                     <button class="chat-send-btn" onclick="sendMessage()">➤</button>
                 </div>
@@ -481,6 +524,111 @@ function renderChat(container) {
         </div>
     `;
 }
+
+// ===== 聊天消息发送（修复：真实渲染消息，而非仅 toast） =====
+async function sendMessage() {
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if (!text) return;
+
+    input.value = '';
+    const messagesBox = document.getElementById('chat-messages');
+    const welcome = messagesBox.querySelector('.chat-welcome');
+    if (welcome) welcome.remove();
+
+    // 用户消息
+    const userMsg = document.createElement('div');
+    userMsg.className = 'msg-row user';
+    userMsg.innerHTML = `<div class="msg-bubble user">${escapeHtml(text)}</div>`;
+    messagesBox.appendChild(userMsg);
+    messagesBox.scrollTop = messagesBox.scrollHeight;
+
+    // AI 思考中
+    const aiLoading = document.createElement('div');
+    aiLoading.className = 'msg-row ai';
+    aiLoading.innerHTML = `<div class="msg-bubble ai loading">AI 思考中<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
+    messagesBox.appendChild(aiLoading);
+    messagesBox.scrollTop = messagesBox.scrollHeight;
+
+    // 判定是否带技能上下文
+    let systemPrompt = '你是OpenWrite AI小说写作助手。帮助用户构思情节、塑造人物、润色文字。回答保持简洁、直接、有行动建议。';
+    const activeSkill = store.activeChatSkill;
+    if (activeSkill) {
+        const skill = await skillManager.get(activeSkill);
+        if (skill && skill.enabled) {
+            systemPrompt = `你是资深中文小说编辑，正在使用技能《${skill.name}》辅助创作。以下是技能规则，请按规则处理用户需求：\n\n${skill.content}\n\n请按技能要求给出专业回答。`;
+        }
+    }
+
+    try {
+        let fullText = '';
+        const response = await ai.chat([
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: text }
+        ], (chunk, full) => {
+            fullText = full;
+            aiLoading.innerHTML = `<div class="msg-bubble ai">${escapeHtml(fullText).replace(/\n/g, '<br>')}</div>`;
+            messagesBox.scrollTop = messagesBox.scrollHeight;
+        }, 4000);
+
+        if (!fullText) fullText = response;
+        aiLoading.innerHTML = `<div class="msg-bubble ai">${escapeHtml(fullText).replace(/\n/g, '<br>')}</div>`;
+
+        // 保存消息
+        try {
+            await db.put('messages', { sessionId: 'main', role: 'user', content: text, created: Date.now() });
+            await db.put('messages', { sessionId: 'main', role: 'assistant', content: fullText, created: Date.now() });
+        } catch (e) { /* ignore */ }
+    } catch (err) {
+        aiLoading.innerHTML = `<div class="msg-bubble ai error">⚠️ ${escapeHtml(err.message)}</div>`;
+    }
+    messagesBox.scrollTop = messagesBox.scrollHeight;
+}
+
+// 技能选择器（聊天中 @ 技能）
+async function openSkillPicker() {
+    const skills = await skillManager.getAll();
+    const enabled = skills.filter(s => s.enabled);
+    if (!enabled.length) {
+        ui.showToast('没有已启用的技能，请先到技能中心启用');
+        navigateTo('skillCenter');
+        return;
+    }
+    const options = enabled.map(s => `<div class="skill-pick-item" onclick="pickChatSkill('${s.id}')"><span>${s.icon}</span><div style="flex:1;"><div style="font-weight:600;">${s.name}</div><div style="font-size:12px;color:var(--text-secondary);">${s.description.slice(0, 30)}...</div></div><span style="color:var(--text-secondary);">›</span></div>`).join('');
+    const modal = createModal('选择技能', `
+        <div style="display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow-y:auto;">
+            ${options}
+            ${store.activeChatSkill ? `<button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="clearChatSkill()">清除当前技能</button>` : ''}
+        </div>`);
+    modal.show();
+}
+
+async function pickChatSkill(id) {
+    store.activeChatSkill = id;
+    closeModal();
+    const skill = await skillManager.get(id);
+    ui.showToast(`已启用技能：${skill.name}，聊天将按此技能规则执行`);
+}
+
+async function clearChatSkill() {
+    store.activeChatSkill = null;
+    closeModal();
+    ui.showToast('已清除聊天技能');
+}
+
+// ===== 模型/记忆/起名/蒸馏/拆解/扫榜 入口 =====
+function showModelIndicator() { showModelConfigModal(); }
+function showMemory() { ui.showToast('记忆功能：写作设定记忆库开发中...'); }
+function showNameGenerator() { ui.showToast('起名功能开发中...'); }
+function showDeconstruct() { ui.showToast('拆解功能开发中...'); }
+function showRank() { ui.showToast('扫榜功能开发中...'); }
+function continueWriting() { navigateTo('bookshelf'); }
+function showTutorial() { showTutorialModal(); }
+function showDistill() { navigateTo('distill'); }
+function useSkill() { openSkillPicker(); }
+function attachFile() { ui.showToast('文件功能开发中...'); }
+function rollDice() { ui.showToast(`🎲 ${Math.floor(Math.random() * 6) + 1}`); }
+function webSearch() { ui.showToast('联网搜索功能开发中...'); }
 
 // ===== Bookshelf Page =====
 async function renderBookshelf(container) {
@@ -632,6 +780,11 @@ async function renderSettings(container) {
 
     const config = await settings.getModelConfig();
     const stats = await novelManager.getStats();
+    let tplCount = 0;
+    try {
+        const tpls = await db.getAll('templates');
+        tplCount = tpls.length;
+    } catch (e) { tplCount = 0; }
 
     container.innerHTML = `
         <div class="settings-group">
@@ -642,6 +795,50 @@ async function renderSettings(container) {
                     <div>
                         <div class="settings-label">模型配置</div>
                         <div class="settings-value">${config.provider || '未配置'} - ${config.model || ''}</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+            <div class="settings-item" onclick="navigateTo('skillCenter')">
+                <div class="settings-item-left">
+                    <div class="settings-icon">🧩</div>
+                    <div>
+                        <div class="settings-label">Skill 管理</div>
+                        <div class="settings-value">浏览、导入与管理写作技能</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+        </div>
+
+        <div class="settings-group">
+            <div class="settings-group-title">创作工具</div>
+            <div class="settings-item" onclick="navigateTo('distill')">
+                <div class="settings-item-left">
+                    <div class="settings-icon">✨</div>
+                    <div>
+                        <div class="settings-label">蒸馏</div>
+                        <div class="settings-value">上传书籍，提取作者写作风格</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+            <div class="settings-item" onclick="navigateTo('distillTemplates')">
+                <div class="settings-item-left">
+                    <div class="settings-icon">🗂️</div>
+                    <div>
+                        <div class="settings-label">风格档案</div>
+                        <div class="settings-value">${tplCount} 个已蒸馏风格</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+            <div class="settings-item" onclick="navigateTo('skillHistory')">
+                <div class="settings-item-left">
+                    <div class="settings-icon">📜</div>
+                    <div>
+                        <div class="settings-label">审查历史</div>
+                        <div class="settings-value">查看去AI味审查报告</div>
                     </div>
                 </div>
                 <span class="settings-arrow">›</span>
@@ -906,42 +1103,6 @@ async function configureModel() {
     }
 }
 
-// ===== Chat Actions =====
-async function sendMessage() {
-    const input = document.getElementById('chat-input');
-    const text = input.value.trim();
-    if (!text) return;
-
-    input.value = '';
-    ui.showToast('AI 思考中...');
-
-    try {
-        const response = await ai.chat([
-            { role: 'system', content: '你是OpenWrite AI小说写作助手。帮助用户构思情节、塑造人物、润色文字。' },
-            { role: 'user', content: text }
-        ]);
-        // In a real implementation, this would append to a chat history UI
-        ui.showToast('回复已生成');
-        console.log('AI Response:', response);
-    } catch (err) {
-        ui.showToast('发送失败: ' + err.message);
-    }
-}
-
-function useSkill() { ui.showToast('技能功能开发中...'); }
-function attachFile() { ui.showToast('文件功能开发中...'); }
-function setDefault() { ui.showToast('已设为默认'); }
-function useMemory() { ui.showToast('记忆功能开发中...'); }
-function rollDice() { ui.showToast(`🎲 ${Math.floor(Math.random() * 6) + 1}`); }
-function webSearch() { ui.showToast('联网搜索功能开发中...'); }
-function showNameGenerator() { ui.showToast('起名功能开发中...'); }
-function showDistill() { ui.showToast('蒸馏功能开发中...'); }
-function showDeconstruct() { ui.showToast('拆解功能开发中...'); }
-function showRank() { ui.showToast('扫榜功能开发中...'); }
-function continueWriting() { navigateTo('bookshelf'); }
-function showTutorial() { ui.showToast('教程功能开发中...'); }
-function showModelIndicator() { showModelConfigModal(); }
-
 // ===== Modal System =====
 function createModal(title, content) {
     const overlay = document.createElement('div');
@@ -993,8 +1154,49 @@ const store = {
     currentNovel: null,
     currentChapter: null,
     novels: [],
-    modelName: 'glm-5.1'
+    modelName: 'glm-5.1',
+    activeChatSkill: null,      // 聊天中启用的技能
+    lastPolish: null,           // 最近一次润色结果
+    lastImitation: null,        // 最近一次仿写结果
+    pendingDistillText: '',     // 待蒸馏文本
+    pendingDistillName: '',     // 待蒸馏书名
+    pendingDistillGenre: ''     // 待蒸馏类型
 };
+
+// ===== 通用工具 =====
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// ===== 使用教程 =====
+function showTutorialModal() {
+    const modal = createModal('使用教程', `
+        <div class="tutorial-body">
+            <div class="tutorial-section">
+                <div class="tutorial-title">✨ 蒸馏 —— 学会一本好书的风格</div>
+                <div class="tutorial-text">上传一本你喜欢的书（txt/md），AI 会分析作者的叙事视角、语言风格、人物塑造、节奏等，生成「风格档案」。之后点「用此风格写作」，输入你的创意，AI 就能模仿该作者的笔法创作。</div>
+            </div>
+            <div class="tutorial-section">
+                <div class="tutorial-title">🧪 去AI味 —— 审查与润色</div>
+                <div class="tutorial-text">把写好的章节粘贴进来选择「审查文本」，AI 会按 8 种 AI 味症状逐段诊断、给出评分和改写示范；选「全文润色」则直接按规则改写全文。聊天输入框点「@ 技能」可在对话中也启用该技能。</div>
+            </div>
+            <div class="tutorial-section">
+                <div class="tutorial-title">✍️ 写作与审稿</div>
+                <div class="tutorial-text">「小说」页可新建作品、写章节、AI 续写、AI 审稿（打分+建议）。编辑器右上角可以保存。</div>
+            </div>
+            <div class="tutorial-section">
+                <div class="tutorial-title">⚙️ 先配置 AI 模型</div>
+                <div class="tutorial-text">所有 AI 功能都需要 API Key：进入「设置 → 模型配置」，填入你的 DeepSeek / OpenAI / GLM 等接口的 Key 和模型名。</div>
+            </div>
+        </div>`);
+    modal.show();
+}
 
 // ===== Init =====
 document.addEventListener('DOMContentLoaded', async () => {
