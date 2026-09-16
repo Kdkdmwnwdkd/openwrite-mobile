@@ -2,6 +2,14 @@
 
 基于 [OpenWrite](https://github.com/LiPu-jpg/Openwrite) 开源项目构建的移动端 AI 小说写作助手。
 
+## 最新版本下载
+
+| 版本 | 日期 | 大小 | 下载链接 |
+|------|------|------|----------|
+| **nightly-debug** | 2026-09-16 | 3.3 MB | [点击下载](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/download/nightly-debug/app-debug.apk) |
+
+---
+
 ## 功能特性
 
 - 📚 **书架管理**：查看和管理你的所有作品
