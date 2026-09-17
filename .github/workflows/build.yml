@@ -50,6 +50,7 @@ jobs:
       - name: Build Debug APK
         run: |
           cd android
+          ./gradlew clean
           ./gradlew assembleDebug
 
       - name: Upload APK
