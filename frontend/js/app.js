@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.6.0',
+    VERSION: '2.7.0',
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 7
@@ -404,7 +404,7 @@ const novelManager = {
         return chapters.find(ch => ch.number === chapterNum);
     },
 
-    async saveChapter(novelId, chapterNum, title, content) {
+    async saveChapter(novelId, chapterNum, title, content, paragraphs = null) {
         const id = `${novelId}_ch${chapterNum}`;
         const chapter = {
             id,
@@ -416,6 +416,9 @@ const novelManager = {
             created: Date.now(),
             updated: Date.now()
         };
+        if (paragraphs !== null) {
+            chapter.paragraphs = paragraphs;
+        }
         await db.put('chapters', chapter);
 
         // Update novel stats
@@ -718,7 +721,8 @@ function navigateTo(page, params = {}) {
         characterEdit: () => renderCharacterEdit(params.novelId, params.characterId),
         // 世界观
         worldview: () => renderWorldView(params.novelId),
-        worldviewEdit: () => renderWorldviewEdit(params.novelId, params.worldviewId)
+        worldviewEdit: () => renderWorldviewEdit(params.novelId, params.worldviewId),
+        paragraphEdit: () => renderParagraphEdit(params.novelId, params.chapterNum)
     };
 
     if (renderers[page]) renderers[page](view);
@@ -1148,6 +1152,8 @@ async function renderChapterEdit(container, novelId, chapterNum) {
         </div>
         <div class="action-buttons-row" style="margin-top: 8px;">
             <button class="btn btn-outline" onclick="navigateTo('beatControl', { novelId: '${novelId}', chapterNum: ${chapterNum} })">🎬 节拍控制</button>
+            <button class="btn btn-outline" onclick="navigateTo('paragraphEdit', { novelId: '${novelId}', chapterNum: ${chapterNum} })">📄 分段编辑</button>
+            <button class="btn btn-outline" onclick="aiReaderSimulate('${novelId}', ${chapterNum})">🎭 AI读者</button>
         </div>
     `;
 }
@@ -4107,4 +4113,424 @@ async function addAllDetectedForeshadowing(novelId) {
     ui.showToast(`已添加 ${added} 个伏笔`);
     closeModal();
     renderForeshadowing(novelId);
+}
+
+// ===== Paragraph Edit (v2.7.0) =====
+
+const PARA_TYPES = {
+    scene:    { label: '场景', icon: '🎬', desc: '环境、时间、地点描写' },
+    dialogue: { label: '对话', icon: '💬', desc: '角色对话、独白' },
+    describe: { label: '描写', icon: '🎨', desc: '外貌、景物、氛围描写' },
+    action:   { label: '动作', icon: '⚔️', desc: '动作、战斗、行为描写' },
+    inner:    { label: '内心', icon: '🧠', desc: '心理活动、内心独白' },
+    trans:    { label: '过渡', icon: '↔️', desc: '转场、时间跳跃、过渡段' }
+};
+
+function parseContentToParagraphs(content) {
+    if (!content) return [];
+    const raw = content.split(/\n{2,}/).map(p => p.trim()).filter(p => p.length > 0);
+    const paragraphs = [];
+    for (let i = 0; i < raw.length; i++) {
+        const text = raw[i];
+        let type = 'scene';
+        if (text.startsWith('"') || text.startsWith('“') || text.startsWith('「') || text.includes('：') || text.includes(':') || /^[""''「」].*[""''」]/s.test(text)) type = 'dialogue';
+        else if (text.includes('想') || text.includes('觉得') || text.includes('感觉') || text.includes('心理')) type = 'inner';
+        else if (text.includes('打') || text.includes('挥') || text.includes('跑') || text.includes('走') || text.includes('跳') || text.includes('杀') || text.includes('战')) type = 'action';
+        else if (text.includes('天') || text.includes('地') || text.includes('风') || text.includes('雨') || text.includes('山') || text.includes('水') || text.includes('色') || text.includes('光')) type = 'describe';
+        else if (text.length < 60 && (text.includes('后来') || text.includes('之后') || text.includes('过了') || text.includes(' meanwhile') || text.includes('转')) && i > 0 && i < raw.length - 1) type = 'trans';
+        paragraphs.push({ id: `para_${i}_${Date.now().toString(36)}`, type, content: text, meta: {}, modified: false });
+    }
+    return paragraphs;
+}
+
+function paragraphsToContent(paragraphs) {
+    return paragraphs.map(p => p.content).join('\n\n');
+}
+
+async function renderParagraphEdit(novelId, chapterNum) {
+    const view = document.getElementById('page-paragraphEdit');
+    if (!view) return;
+    const novel = await novelManager.get(novelId);
+    const chapter = await novelManager.getChapter(novelId, chapterNum);
+    ui.setPageTitle(`${novel?.title || ''} · 第${chapterNum}章 分段编辑`);
+    ui.setHeaderActions(`<button class="header-btn" onclick="navigateTo('chapterEdit', { novelId: '${novelId}', chapterNum: ${chapterNum} })">返回</button><button class="header-btn" onclick="saveParagraphEdit('${novelId}', ${chapterNum})">保存</button>`);
+
+    let paragraphs = chapter?.paragraphs;
+    if (!paragraphs || !Array.isArray(paragraphs) || paragraphs.length === 0) {
+        paragraphs = parseContentToParagraphs(chapter?.content || '');
+    }
+    window._paragraphEditData = { novelId, chapterNum, paragraphs };
+
+    view.innerHTML = `
+        <div class="para-edit-container">
+            <div class="para-edit-toolbar">
+                <button class="btn btn-sm btn-outline" onclick="aiAutoSegment('${novelId}', ${chapterNum})">🤖 AI智能分段</button>
+                <button class="btn btn-sm btn-outline" onclick="addNewParagraph()">➕ 添加段落</button>
+            </div>
+            <div class="para-edit-list" id="para-edit-list">
+                ${paragraphs.map((p, idx) => renderParagraphCard(p, idx)).join('')}
+            </div>
+        </div>`;
+}
+
+function renderParagraphCard(para, idx) {
+    const typeInfo = PARA_TYPES[para.type] || PARA_TYPES.scene;
+    return `
+        <div class="para-card ${para.modified ? 'para-modified' : ''}" id="para-card-${idx}">
+            <div class="para-card-header">
+                <span class="para-type-badge" style="background: var(--primary-light); color: #fff;" onclick="changeParagraphType(${idx})">${typeInfo.icon} ${typeInfo.label}</span>
+                <span class="para-idx">#${idx + 1}</span>
+                <div class="para-actions">
+                    <button class="para-btn" onclick="moveParagraph(${idx}, -1)" title="上移">↑</button>
+                    <button class="para-btn" onclick="moveParagraph(${idx}, 1)" title="下移">↓</button>
+                    <button class="para-btn" onclick="deleteParagraph(${idx})" title="删除">🗑</button>
+                    <button class="para-btn para-btn-ai" onclick="openAiParaAction(${idx})" title="AI操作">✨</button>
+                </div>
+            </div>
+            <textarea class="para-textarea" id="para-text-${idx}" rows="4" onchange="markParagraphModified(${idx})">${escapeHtml(para.content)}</textarea>
+            ${para.meta?.aiNote ? `<div class="para-meta">AI备注: ${escapeHtml(para.meta.aiNote)}</div>` : ''}
+        </div>`;
+}
+
+function markParagraphModified(idx) {
+    const data = window._paragraphEditData;
+    if (!data) return;
+    data.paragraphs[idx].content = document.getElementById(`para-text-${idx}`).value;
+    data.paragraphs[idx].modified = true;
+    const card = document.getElementById(`para-card-${idx}`);
+    if (card) card.classList.add('para-modified');
+}
+
+function changeParagraphType(idx) {
+    const data = window._paragraphEditData;
+    if (!data) return;
+    const current = data.paragraphs[idx].type;
+    const keys = Object.keys(PARA_TYPES);
+    const next = keys[(keys.indexOf(current) + 1) % keys.length];
+    data.paragraphs[idx].type = next;
+    data.paragraphs[idx].modified = true;
+    renderParagraphEdit(data.novelId, data.chapterNum);
+}
+
+function moveParagraph(idx, dir) {
+    const data = window._paragraphEditData;
+    if (!data) return;
+    const target = idx + dir;
+    if (target < 0 || target >= data.paragraphs.length) return;
+    const tmp = data.paragraphs[idx];
+    data.paragraphs[idx] = data.paragraphs[target];
+    data.paragraphs[target] = tmp;
+    renderParagraphEdit(data.novelId, data.chapterNum);
+}
+
+function deleteParagraph(idx) {
+    const data = window._paragraphEditData;
+    if (!data) return;
+    if (!confirm('确定删除此段落吗？')) return;
+    data.paragraphs.splice(idx, 1);
+    renderParagraphEdit(data.novelId, data.chapterNum);
+}
+
+function addNewParagraph() {
+    const data = window._paragraphEditData;
+    if (!data) return;
+    data.paragraphs.push({ id: `para_${data.paragraphs.length}_${Date.now().toString(36)}`, type: 'scene', content: '', meta: {}, modified: true });
+    renderParagraphEdit(data.novelId, data.chapterNum);
+}
+
+async function saveParagraphEdit(novelId, chapterNum) {
+    const data = window._paragraphEditData;
+    if (!data) return;
+    const paragraphs = data.paragraphs;
+    const content = paragraphsToContent(paragraphs);
+    const chapter = await novelManager.getChapter(novelId, chapterNum);
+    const title = chapter?.title || `第${chapterNum}章`;
+    await novelManager.saveChapter(novelId, chapterNum, title, content, paragraphs);
+    ui.showToast('分段编辑已保存');
+    navigateTo('chapterEdit', { novelId, chapterNum });
+}
+
+// AI单段操作弹窗
+function openAiParaAction(idx) {
+    const data = window._paragraphEditData;
+    if (!data) return;
+    const para = data.paragraphs[idx];
+    const actions = [
+        { key: 'rewrite', label: '✍️ 重写' },
+        { key: 'expand', label: '📈 扩写' },
+        { key: 'condense', label: '📉 缩略' },
+        { key: 'viewpoint', label: '🔄 切换视角' }
+    ];
+    const html = `
+        <div class="para-ai-modal">
+            <div class="para-ai-title">AI段落操作 — ${PARA_TYPES[para.type]?.label || '段落'} #${idx + 1}</div>
+            <div class="para-ai-actions">
+                ${actions.map(a => `<button class="btn btn-outline btn-block" style="margin-bottom: 8px;" onclick="runAiParaAction(${idx}, '${a.key}')">${a.label}</button>`).join('')}
+            </div>
+            <div style="margin-top: 12px;">
+                <input type="text" class="input" id="para-custom-cmd" placeholder="自定义指令，如：增加悬念感...">
+                <button class="btn btn-primary btn-block" style="margin-top: 8px;" onclick="runAiParaAction(${idx}, 'custom')">🚀 执行自定义</button>
+            </div>
+            <div style="margin-top: 12px; font-size: 12px; color: var(--text-tertiary);">修改后将自动触发涟漪更新（后续3段）</div>
+        </div>`;
+    createModal('AI 段落操作', html);
+}
+
+async function runAiParaAction(idx, action) {
+    const data = window._paragraphEditData;
+    if (!data) return;
+    const novel = await novelManager.get(data.novelId);
+    const para = data.paragraphs[idx];
+    let instruction = '';
+    if (action === 'rewrite') instruction = '请重写以下段落，保持核心情节不变，但优化文笔、节奏和表达。';
+    else if (action === 'expand') instruction = '请扩写以下段落，增加细节描写、环境渲染或心理活动，使内容更丰富饱满。';
+    else if (action === 'condense') instruction = '请缩略以下段落，保留核心信息和关键细节，去除冗余描述。';
+    else if (action === 'viewpoint') instruction = '请切换以下段落的叙事视角（如第一人称改第三人称，或更换聚焦角色）。';
+    else if (action === 'custom') {
+        const cmd = document.getElementById('para-custom-cmd')?.value.trim();
+        if (!cmd) { ui.showToast('请输入自定义指令'); return; }
+        instruction = `请按以下要求修改段落：${cmd}`;
+    }
+
+    const prompt = `${instruction}\n\n段落类型：${PARA_TYPES[para.type]?.label || '段落'}\n\n原文：\n${para.content}\n\n只返回修改后的段落内容，不要解释。`;
+    closeModal();
+    ui.showToast('AI处理中...');
+    try {
+        const result = await ai.chat([
+            { role: 'system', content: '你是专业小说编辑，擅长段落级别的精修。只输出修改后的段落正文，不输出额外解释。' },
+            { role: 'user', content: prompt }
+        ], null, 1200);
+        const newContent = result.trim();
+        showDiffAndConfirm(para.content, newContent, async () => {
+            para.content = newContent;
+            para.modified = true;
+            if (action !== 'condense') {
+                ui.showToast('已应用，正在涟漪更新后续段落...');
+                await rippleUpdate(idx);
+            } else {
+                ui.showToast('已应用');
+            }
+            renderParagraphEdit(data.novelId, data.chapterNum);
+        });
+    } catch (e) {
+        ui.showToast('AI处理失败: ' + e.message);
+    }
+}
+
+function showDiffAndConfirm(oldText, newText, onConfirm) {
+    const html = `
+        <div class="diff-container">
+            <div class="diff-section">
+                <div class="diff-label">原文</div>
+                <div class="diff-old">${escapeHtml(oldText)}</div>
+            </div>
+            <div class="diff-section">
+                <div class="diff-label">修改后</div>
+                <div class="diff-new">${escapeHtml(newText)}</div>
+            </div>
+            <div class="diff-actions">
+                <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+                <button class="btn btn-primary" onclick="closeModal(); (window._diffConfirmCallback)();">确认应用</button>
+            </div>
+        </div>`;
+    window._diffConfirmCallback = onConfirm;
+    createModal('Diff对比确认', html);
+}
+
+async function rippleUpdate(changedIdx) {
+    const data = window._paragraphEditData;
+    if (!data) return;
+    const paragraphs = data.paragraphs;
+    const start = changedIdx + 1;
+    const end = Math.min(paragraphs.length, start + 3);
+    if (start >= end) return;
+    const novel = await novelManager.get(data.novelId);
+    const prevContext = paragraphs.slice(Math.max(0, changedIdx - 1), changedIdx + 1).map(p => p.content).join('\n\n');
+    const targetParagraphs = paragraphs.slice(start, end);
+    const prompt = `以下是一个小说章节中的连续段落。第${changedIdx + 1}段已被修改，请根据修改后的上下文，调整后续${targetParagraphs.length}个段落，使其保持连贯一致。\n\n前文（含修改段）：\n${prevContext}\n\n需要调整的段落：\n${targetParagraphs.map((p, i) => `[段落${start + i + 1}] (${PARA_TYPES[p.type]?.label || '段落'})\n${p.content}`).join('\n\n')}\n\n请返回调整后的段落，格式如下，每段用 --- 分隔：\n段落1内容\n---\n段落2内容\n---\n段落3内容`;
+    try {
+        const result = await ai.chat([
+            { role: 'system', content: '你是专业小说编辑，擅长保持段落间的连贯性。只输出调整后的段落内容，用 --- 分隔。' },
+            { role: 'user', content: prompt }
+        ], null, 2000);
+        const parts = result.split(/\n?---+\n?/).map(s => s.trim()).filter(s => s.length > 0);
+        for (let i = 0; i < parts.length && (start + i) < end; i++) {
+            paragraphs[start + i].content = parts[i];
+            paragraphs[start + i].modified = true;
+        }
+    } catch (e) {
+        console.error('Ripple update failed:', e);
+    }
+}
+
+async function aiAutoSegment(novelId, chapterNum) {
+    const chapter = await novelManager.getChapter(novelId, chapterNum);
+    if (!chapter || !chapter.content) { ui.showToast('章节无内容'); return; }
+    const content = chapter.content;
+    if (content.length < 100) { ui.showToast('内容太短，无需分段'); return; }
+    ui.showLoading(document.getElementById('view-container') || document.body);
+    try {
+        const prompt = `请将以下小说章节内容按叙事功能自动分段。每个段落标记其类型（scene=场景, dialogue=对话, describe=描写, action=动作, inner=内心, trans=过渡）。\n\n要求：\n1. 只返回 JSON 数组，每个元素包含 type 和 content\n2. content 是段落正文，不要截断关键内容\n3. 保持原文完整性，不要遗漏内容\n4. 如果内容较短，至少分成3段\n\n章节内容：\n${content.substring(0, 4000)}`;
+        const result = await ai.chat([
+            { role: 'system', content: '你是专业小说结构分析师。只输出纯JSON数组，不要markdown代码块。' },
+            { role: 'user', content: prompt }
+        ], null, 3000);
+        let segments = [];
+        try {
+            const cleaned = result.replace(/\`\`\`json?\s*/g, '').replace(/\`\`\`\s*/g, '').trim();
+            segments = JSON.parse(cleaned);
+            if (!Array.isArray(segments)) segments = [];
+        } catch (e) {
+            const match = result.match(/\[[\s\S]*\]/);
+            if (match) {
+                try { segments = JSON.parse(match[0]); } catch (_) {}
+            }
+        }
+        if (segments.length === 0) {
+            ui.showToast('AI分段失败，请手动分段');
+            return;
+        }
+        const paragraphs = segments.map((s, i) => ({
+            id: `para_${i}_${Date.now().toString(36)}`,
+            type: Object.keys(PARA_TYPES).includes(s.type) ? s.type : 'scene',
+            content: s.content || s.text || '',
+            meta: { aiSegmented: true },
+            modified: false
+        })).filter(p => p.content.length > 0);
+        if (paragraphs.length === 0) { ui.showToast('AI分段结果为空'); return; }
+        window._paragraphEditData.paragraphs = paragraphs;
+        renderParagraphEdit(novelId, chapterNum);
+        ui.showToast(`AI已智能分段为 ${paragraphs.length} 段`);
+    } catch (e) {
+        ui.showToast('AI分段失败: ' + e.message);
+    }
+}
+
+// ===== AI Reader Simulation (v2.7.0) =====
+
+async function aiReaderSimulate(novelId, chapterNum) {
+    const novel = await novelManager.get(novelId);
+    const chapter = await novelManager.getChapter(novelId, chapterNum);
+    if (!chapter || !chapter.content) { ui.showToast('章节无内容'); return; }
+    ui.showToast('AI读者正在分析章节...');
+    try {
+        const prompt = `请你以资深网文读者的身份，对以下小说章节进行深度阅读分析。\n\n小说：《${novel?.title || '未命名'}》\n章节：第${chapterNum}章 ${chapter.title || ''}\n\n内容：\n${chapter.content.substring(0, 3500)}\n\n请输出以下JSON格式（不要markdown代码块）：\n{\n  "overallScore": 0-100的整数评分,\n  "emotionCurve": [{"segment": "开头", "score": 1-10}, {"segment": "发展", "score": 1-10}, {"segment": "高潮", "score": 1-10}, {"segment": "结尾", "score": 1-10}],\n  "highlights": ["爽点描述1", "爽点描述2"],\n  "issues": [{"type": "拖沓/逻辑/描写/节奏/其他", "desc": "问题描述", "severity": "low/medium/high"}],\n  "summary": "200字以内的综合点评"\n}`;
+        const result = await ai.chat([
+            { role: 'system', content: '你是一位资深的网络小说读者，擅长从读者体验角度分析小说章节。严格按JSON格式输出，不要其他文字。' },
+            { role: 'user', content: prompt }
+        ], null, 2000);
+        let report = null;
+        let rawText = result;
+        const parseJson = (text) => {
+            let cleaned = text.replace(/\`\`\`json?\s*/g, '').replace(/\`\`\`\s*/g, '').trim();
+            try { return JSON.parse(cleaned); } catch (_) {}
+            const m = cleaned.match(/\{[\s\S]*\}/);
+            if (m) { try { return JSON.parse(m[0]); } catch (_) {} }
+            return null;
+        };
+        report = parseJson(result);
+        // Fallback: try to extract structured data from raw text
+        if (!report) {
+            report = fallbackParseReaderReport(rawText);
+        }
+        if (!report) {
+            ui.showToast('AI分析结果解析失败');
+            return;
+        }
+        showAiReaderReport(novelId, chapterNum, report, rawText);
+    } catch (e) {
+        ui.showToast('AI读者分析失败: ' + e.message);
+    }
+}
+
+function fallbackParseReaderReport(text) {
+    const score = text.match(/评分[:：]\s*(\d+)/)?.[1];
+    const summary = text.match(/总结[:：]([\s\S]*?)(?:\n{2,}|$)/)?.[1]?.trim();
+    const highlights = [];
+    const issues = [];
+    const hlMatches = text.matchAll(/[•\-]\s*(爽点|亮点)[:：]?\s*(.+)/g);
+    for (const m of hlMatches) highlights.push(m[2].trim());
+    const issueMatches = text.matchAll(/[•\-]\s*(问题|不足|拖沓|逻辑|描写|节奏)[:：]?\s*(.+)/g);
+    for (const m of issueMatches) {
+        issues.push({ type: m[1].trim(), desc: m[2].trim(), severity: 'medium' });
+    }
+    if (!score && highlights.length === 0 && issues.length === 0 && !summary) return null;
+    return {
+        overallScore: parseInt(score) || 70,
+        emotionCurve: [{ segment: '开头', score: 6 }, { segment: '发展', score: 6 }, { segment: '高潮', score: 6 }, { segment: '结尾', score: 6 }],
+        highlights: highlights.length > 0 ? highlights : ['未明确提取爽点'],
+        issues: issues.length > 0 ? issues : [{ type: '其他', desc: '未明确提取问题', severity: 'low' }],
+        summary: summary || 'AI分析结果结构化提取不完整，建议查看原始输出。'
+    };
+}
+
+function showAiReaderReport(novelId, chapterNum, report, rawText) {
+    const ec = report.emotionCurve || [];
+    const maxScore = Math.max(...ec.map(e => e.score || 0), 1);
+    const ecHtml = ec.map(e => {
+        const pct = Math.round(((e.score || 0) / maxScore) * 100);
+        const color = (e.score || 0) >= 8 ? 'var(--success)' : (e.score || 0) >= 5 ? 'var(--warning)' : 'var(--danger)';
+        return `<div class="reader-ec-item"><div class="reader-ec-label">${escapeHtml(e.segment)}</div><div class="reader-ec-bar"><div class="reader-ec-fill" style="width:${pct}%; background:${color}"></div></div><div class="reader-ec-score">${e.score}</div></div>`;
+    }).join('');
+    const highlightsHtml = (report.highlights || []).map(h => `<div class="reader-card reader-highlight">⚡ ${escapeHtml(h)}</div>`).join('') || '<div class="reader-card reader-highlight">暂无明确爽点</div>';
+    const issuesHtml = (report.issues || []).map(iss => {
+        const color = iss.severity === 'high' ? 'var(--danger)' : iss.severity === 'low' ? 'var(--success)' : 'var(--warning)';
+        return `<div class="reader-card reader-issue" style="border-left-color:${color}"><div class="reader-issue-type" style="color:${color}">${escapeHtml(iss.type)}</div><div class="reader-issue-desc">${escapeHtml(iss.desc)}</div></div>`;
+    }).join('') || '<div class="reader-card reader-issue">暂无明确问题</div>';
+    const html = `
+        <div class="reader-report">
+            <div class="reader-score-section">
+                <div class="reader-score-circle">
+                    <div class="reader-score-num">${report.overallScore || 0}</div>
+                    <div class="reader-score-label">综合评分</div>
+                </div>
+            </div>
+            <div class="reader-section">
+                <div class="reader-section-title">📈 情绪曲线</div>
+                <div class="reader-ec">${ecHtml}</div>
+            </div>
+            <div class="reader-section">
+                <div class="reader-section-title">⚡ 爽点 / 亮点</div>
+                <div class="reader-cards">${highlightsHtml}</div>
+            </div>
+            <div class="reader-section">
+                <div class="reader-section-title">⚠️ 问题诊断</div>
+                <div class="reader-cards">${issuesHtml}</div>
+            </div>
+            <div class="reader-section">
+                <div class="reader-section-title">📝 综合点评</div>
+                <div class="reader-summary">${escapeHtml(report.summary || '')}</div>
+            </div>
+            <div class="reader-actions">
+                <button class="btn btn-primary btn-block" onclick="aiReaderRewrite('${novelId}', ${chapterNum})">✨ 一键采纳建议并重写</button>
+                <button class="btn btn-outline btn-block" style="margin-top:8px;" onclick="showRawReaderOutput('${escapeHtml(rawText?.substring(0, 800) || '')}')">📄 查看原始输出</button>
+            </div>
+        </div>`;
+    createModal('🎭 AI读者分析报告', html);
+}
+
+function showRawReaderOutput(text) {
+    createModal('原始输出', `<pre style="white-space:pre-wrap; font-size:12px; max-height:50vh; overflow-y:auto; background:var(--bg); padding:12px; border-radius:8px;">${escapeHtml(text)}</pre>`);
+}
+
+async function aiReaderRewrite(novelId, chapterNum) {
+    const chapter = await novelManager.getChapter(novelId, chapterNum);
+    if (!chapter || !chapter.content) { ui.showToast('章节无内容'); return; }
+    closeModal();
+    ui.showToast('AI正在根据读者反馈重写章节...');
+    try {
+        const prompt = `请你作为专业小说编辑，根据AI读者的反馈建议，对以下章节进行重写优化。\n\n要求：\n1. 保留核心情节和角色设定\n2. 增强爽点、优化节奏\n3. 修正读者指出的问题（如拖沓、逻辑漏洞等）\n4. 保持原有风格和字数大致相当\n5. 直接输出重写后的完整章节内容\n\n原文：\n${chapter.content.substring(0, 4000)}`;
+        const result = await ai.chat([
+            { role: 'system', content: '你是资深小说编辑，擅长根据读者反馈优化小说章节。直接输出重写后的完整正文。' },
+            { role: 'user', content: prompt }
+        ], null, 4000);
+        const newContent = result.trim();
+        showDiffAndConfirm(chapter.content, newContent, async () => {
+            await novelManager.saveChapter(novelId, chapterNum, chapter.title, newContent, chapter.paragraphs);
+            ui.showToast('章节已重写并保存');
+            navigateTo('chapterEdit', { novelId, chapterNum });
+        });
+    } catch (e) {
+        ui.showToast('重写失败: ' + e.message);
+    }
 }

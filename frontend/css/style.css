@@ -3210,3 +3210,312 @@ html, body {
     padding-top: 8px;
     border-top: 1px solid var(--border);
 }
+
+/* ===== Paragraph Edit (v2.7.0) ===== */
+.para-edit-container {
+    padding: 12px 16px;
+    padding-bottom: calc(var(--safe-bottom) + 16px);
+}
+.para-edit-toolbar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.para-edit-toolbar .btn-sm {
+    font-size: 12px;
+    padding: 6px 10px;
+}
+.para-edit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.para-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.para-card.para-modified {
+    border-color: var(--primary-light);
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.08);
+}
+.para-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.para-type-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    user-select: none;
+    flex-shrink: 0;
+}
+.para-idx {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-right: auto;
+}
+.para-actions {
+    display: flex;
+    gap: 4px;
+}
+.para-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: all 0.15s;
+}
+.para-btn:hover {
+    background: var(--primary-light);
+    color: #fff;
+    border-color: var(--primary-light);
+}
+.para-btn-ai {
+    background: rgba(99, 102, 241, 0.1);
+    border-color: var(--primary-light);
+    color: var(--primary);
+}
+.para-btn-ai:hover {
+    background: var(--primary);
+    color: #fff;
+}
+.para-textarea {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text);
+    background: var(--bg);
+    resize: vertical;
+    font-family: inherit;
+}
+.para-textarea:focus {
+    outline: none;
+    border-color: var(--primary-light);
+}
+.para-meta {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 6px;
+    padding: 4px 8px;
+    background: var(--bg);
+    border-radius: 6px;
+}
+
+/* AI Paragraph Action Modal */
+.para-ai-modal {
+    padding: 4px;
+}
+.para-ai-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 12px;
+}
+.para-ai-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* Diff Viewer */
+.diff-container {
+    padding: 4px;
+}
+.diff-section {
+    margin-bottom: 14px;
+}
+.diff-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.diff-old {
+    background: rgba(239, 68, 68, 0.06);
+    border-left: 3px solid var(--danger);
+    padding: 10px 12px;
+    border-radius: 0 8px 8px 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+    white-space: pre-wrap;
+    max-height: 30vh;
+    overflow-y: auto;
+}
+.diff-new {
+    background: rgba(34, 197, 94, 0.06);
+    border-left: 3px solid var(--success);
+    padding: 10px 12px;
+    border-radius: 0 8px 8px 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+    white-space: pre-wrap;
+    max-height: 30vh;
+    overflow-y: auto;
+}
+.diff-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+/* ===== AI Reader Report (v2.7.0) ===== */
+.reader-report {
+    padding: 8px;
+    max-height: 70vh;
+    overflow-y: auto;
+}
+.reader-score-section {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 20px;
+}
+.reader-score-circle {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    background: conic-gradient(var(--primary) calc(var(--score) * 1%), var(--bg) 0);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+.reader-score-circle::before {
+    content: '';
+    position: absolute;
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: var(--surface);
+}
+.reader-score-num {
+    position: relative;
+    font-size: 28px;
+    font-weight: 800;
+    color: var(--primary);
+    z-index: 1;
+    line-height: 1;
+}
+.reader-score-label {
+    position: relative;
+    font-size: 11px;
+    color: var(--text-secondary);
+    z-index: 1;
+    margin-top: 2px;
+}
+.reader-section {
+    margin-bottom: 16px;
+}
+.reader-section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.reader-ec {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.reader-ec-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.reader-ec-label {
+    width: 48px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+    text-align: right;
+}
+.reader-ec-bar {
+    flex: 1;
+    height: 10px;
+    background: var(--bg);
+    border-radius: 5px;
+    overflow: hidden;
+}
+.reader-ec-fill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width 0.6s ease;
+}
+.reader-ec-score {
+    width: 24px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    text-align: right;
+}
+.reader-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.reader-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+.reader-highlight {
+    border-left: 3px solid var(--warning);
+    color: var(--text);
+}
+.reader-issue {
+    border-left: 3px solid var(--danger);
+    color: var(--text);
+}
+.reader-issue-type {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+.reader-issue-desc {
+    color: var(--text-secondary);
+}
+.reader-summary {
+    background: var(--bg);
+    border-radius: var(--radius-sm);
+    padding: 12px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+}
+.reader-actions {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
