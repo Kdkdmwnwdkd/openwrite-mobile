@@ -1067,14 +1067,20 @@ function showModelConfigModal() {
             <div><label style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500;">API Key</label>
             <input type="password" class="input" id="model-api-key" placeholder="输入你的 API Key..."></div>
             <div><label style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500;">模型</label>
-            <select class="input" id="model-name">
+            <select class="input" id="model-name" onchange="toggleCustomModelRow()">
+                <option value="glm-5.1">GLM-5.1（智谱）</option>
+                <option value="glm-4.5">GLM-4.5（智谱）</option>
+                <option value="glm-4">GLM-4（智谱）</option>
                 <option value="deepseek-chat">DeepSeek Chat</option>
                 <option value="deepseek-reasoner">DeepSeek Reasoner</option>
+                <option value="gpt-4o">GPT-4o</option>
                 <option value="gpt-4">GPT-4</option>
                 <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-                <option value="claude-3-sonnet">Claude 3 Sonnet</option>
-                <option value="glm-4">GLM-4</option>
+                <option value="claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+                <option value="custom">自定义模型名</option>
             </select></div>
+            <div id="custom-model-row" style="display:none;"><label style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500;">模型名</label>
+            <input type="text" class="input" id="model-custom-name" placeholder="如：glm-5.1"></div>
             <div><label style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500;">Base URL（可选）</label>
             <input type="text" class="input" id="model-base-url" placeholder="https://api.deepseek.com"></div>
             <button class="btn btn-primary btn-block" onclick="configureModel()">保存配置</button>
@@ -1082,10 +1088,22 @@ function showModelConfigModal() {
     modal.show();
 }
 
+function toggleCustomModelRow() {
+    const select = document.getElementById('model-name');
+    const row = document.getElementById('custom-model-row');
+    if (select && row) {
+        row.style.display = select.value === 'custom' ? 'block' : 'none';
+    }
+}
+
 async function configureModel() {
     const apiKey = document.getElementById('model-api-key').value.trim();
-    const model = document.getElementById('model-name').value;
+    let model = document.getElementById('model-name').value;
     const baseUrl = document.getElementById('model-base-url').value.trim();
+    if (model === 'custom') {
+        model = document.getElementById('model-custom-name').value.trim();
+        if (!model) { ui.showToast('请输入自定义模型名'); return; }
+    }
 
     if (!apiKey) { ui.showToast('请输入 API Key'); return; }
 
