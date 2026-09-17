@@ -722,7 +722,13 @@ function navigateTo(page, params = {}) {
         // 世界观
         worldview: () => renderWorldView(params.novelId),
         worldviewEdit: () => renderWorldviewEdit(params.novelId, params.worldviewId),
-        paragraphEdit: () => renderParagraphEdit(params.novelId, params.chapterNum)
+        paragraphEdit: () => renderParagraphEdit(params.novelId, params.chapterNum),
+        // 多Agent协作
+        agentStudio: () => renderAgentStudio(params.novelId),
+        // 一致性检查
+        consistencyCheck: () => renderConsistencyCheck(params.novelId),
+        // 导出分发
+        novelExport: () => renderNovelExport(params.novelId)
     };
 
     if (renderers[page]) renderers[page](view);
@@ -1054,6 +1060,9 @@ async function renderNovelDetail(container, novelId) {
             </div>
             <div class="action-buttons-row" style="margin-bottom: 12px;">
                 <button class="btn btn-outline" onclick="navigateTo('worldview', { novelId: '${novelId}' })">🌍 世界观</button>
+                <button class="btn btn-outline" onclick="navigateTo('agentStudio', { novelId: '${novelId}' })">🎭 多Agent</button>
+                <button class="btn btn-outline" onclick="navigateTo('consistencyCheck', { novelId: '${novelId}' })">🔍 一致性</button>
+                <button class="btn btn-outline" onclick="navigateTo('novelExport', { novelId: '${novelId}' })">📤 导出</button>
             </div>
 
             <!-- 目录树形结构 -->
@@ -4532,5 +4541,597 @@ async function aiReaderRewrite(novelId, chapterNum) {
         });
     } catch (e) {
         ui.showToast('重写失败: ' + e.message);
+    }
+}
+
+// ===== 多Agent协作框架 (v2.7.0) =====
+const AGENT_DEFS = [
+    {
+        key: 'goethe',
+        name: 'Goethe',
+        role: '规划师',
+        icon: '🗺️',
+        color: '#8b5cf6',
+        tagline: '设计大纲、情节推演、世界构建',
+        systemPrompt: '你是 Goethe，资深小说规划师。你的职责是：1) 设计四层大纲（全书-卷-章-节）；2) 推演情节走向与冲突升级；3) 构建世界观与规则体系；4) 管理伏笔与回收计划。输出结构清晰、可直接执行，善用列表与编号。'
+    },
+    {
+        key: 'dante',
+        name: 'Dante',
+        role: '写手',
+        icon: '✍️',
+        color: '#f59e0b',
+        tagline: '章节写作、片段扩写、气氛渲染',
+        systemPrompt: '你是 Dante，才华横溢的小说写手。你的职责是：1) 将大纲展开为具体章节正文；2) 保持人物性格、视角一致；3) 善用五感描写与节奏控制；4) 关注爽点密度与阅读体验。直接输出正文，不要解释写作过程。'
+    },
+    {
+        key: 'virgil',
+        name: 'Virgil',
+        role: '审稿人',
+        icon: '🔍',
+        color: '#ef4444',
+        tagline: '逻辑审查、文风诊断、修改建议',
+        systemPrompt: '你是 Virgil，严苛的小说审稿人。你的职责是：1) 检查情节逻辑与设定一致性；2) 找出文风、节奏、描写问题；3) 诊断爽点与小高潮分布；4) 给出可操作的分条修改建议。先给总体评价，再列具体问题，最后给出修改方案。'
+    }
+];
+
+const agentSession = {
+    currentAgent: 'goethe',
+    novelId: null,
+    messages: [],           // 跨Agent传递的上下文栈 [{agent, role, content}]
+    history: [],            // 页面执行历史 [{agent, input, output, time}]
+
+    async load(novelId) {
+        this.novelId = novelId;
+        this.currentAgent = 'goethe';
+        this.messages = [];
+        this.history = [];
+        try {
+            const saved = await db.get('settings', `agent_${novelId}`);
+            if (saved && saved.v) {
+                this.messages = saved.v.messages || [];
+                this.history = saved.v.history || [];
+            }
+        } catch (_) {}
+    },
+
+    async save() {
+        if (!this.novelId) return;
+        try {
+            await db.put('settings', { key: `agent_${this.novelId}`, v: { messages: this.messages.slice(-30), history: this.history.slice(-20) } });
+        } catch (_) {}
+    },
+
+    def() { return AGENT_DEFS.find(a => a.key === this.currentAgent) || AGENT_DEFS[0]; },
+
+    // 上下文传递：把当前Agent的最后输出作为context注入下一个Agent
+    getContextFor(agentKey) {
+        const contextParts = [];
+        for (const m of this.messages) {
+            const def = AGENT_DEFS.find(a => a.key === m.agent);
+            contextParts.push(`【${def ? def.name + '·' + def.role : m.agent} 的输出】\n${m.content}`);
+        }
+        return contextParts.length > 0 ? contextParts.join('\n\n') : '';
+    },
+
+    // 切换读者视角
+    switchTo(agentKey) {
+        this.currentAgent = agentKey;
+    }
+};
+
+async function renderAgentStudio(container, novelId) {
+    const novel = await novelManager.get(novelId);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    await agentSession.load(novelId);
+    store.currentNovel = novel;
+    ui.setPageTitle('🎭 多Agent协作');
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
+    `);
+
+    const tabsHtml = AGENT_DEFS.map((a, i) => `
+        <div class="agent-tab${i === 0 ? ' active' : ''}" data-agent="${a.key}" onclick="agentSwitchTab('${a.key}')" style="border-top-color: ${a.color}">
+            <div class="agent-tab-icon">${a.icon}</div>
+            <div class="agent-tab-name">${a.name}</div>
+            <div class="agent-tab-role">${a.role}</div>
+        </div>`).join('');
+
+    container.innerHTML = `
+        <div class="agent-studio">
+            <div class="agent-tabs">${tabsHtml}</div>
+
+            <div class="agent-panel" id="agent-panel">
+                <div class="agent-panel-head">
+                    <div class="agent-panel-icon" id="agent-panel-icon">🗺️</div>
+                    <div class="agent-panel-info">
+                        <div class="agent-panel-title" id="agent-panel-title">Goethe 规划师</div>
+                        <div class="agent-panel-tagline" id="agent-panel-tagline">设计大纲、情节推演、世界构建</div>
+                    </div>
+                </div>
+                <div class="agent-panel-prompt" id="agent-panel-prompt"></div>
+            </div>
+
+            <div class="agent-workbox">
+                <div class="agent-workbox-label">📥 输入（任务指令 / 待审文本，可用「传递上下文」带入上游输出）</div>
+                <textarea id="agent-input" class="agent-input" placeholder="例如：为第3章设计一个强冲突的登场场景，埋下伏笔…">${escapeHtml(agentSession.getContextFor(agentSession.currentAgent))}</textarea>
+                <div class="agent-workbox-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="agentLoadContext()">🔗 传递上游上下文</button>
+                    <button class="btn btn-sm" onclick="agentInsertOutline()">📋 插入大纲</button>
+                    <button class="btn btn-primary" onclick="agentRun()" style="margin-left:auto;">▶ 执行</button>
+                </div>
+            </div>
+
+            <div class="agent-output" id="agent-output">
+                <div class="agent-output-empty">选择角色并输入任务后点击「执行」，各 Agent 的产出会按顺序汇成协作流水线。</div>
+            </div>
+
+            <div class="agent-history" id="agent-history"></div>
+        </div>`;
+
+    agentRefreshTabs();
+    agentRenderHistory();
+}
+
+function agentRefreshTabs() {
+    document.querySelectorAll('.agent-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.agent === agentSession.currentAgent);
+    });
+    const def = agentSession.def();
+    if (!def) return;
+    document.getElementById('agent-panel-icon').textContent = def.icon;
+    document.getElementById('agent-panel-title').textContent = `${def.name} · ${def.role}`;
+    document.getElementById('agent-panel-tagline').textContent = def.tagline;
+    document.getElementById('agent-panel-prompt').textContent = def.systemPrompt;
+    const input = document.getElementById('agent-input');
+    if (input && input.value.trim() === '') {
+        input.value = agentSession.getContextFor(def.key);
+        const ctxLen = agentSession.messages.length;
+        input.placeholder = ctxLen > 0
+            ? '已带入上游上下文，可继续输入任务指令…'
+            : '例如：为第3章设计一个强冲突的登场场景，埋下伏笔…';
+    }
+}
+
+function agentSwitchTab(agentKey) {
+    agentSession.switchTo(agentKey);
+    agentRefreshTabs();
+}
+
+// 把上游各Agent的输出组织为上下文注入当前输入
+function agentLoadContext() {
+    const context = agentSession.getContextFor(agentSession.currentAgent);
+    const input = document.getElementById('agent-input');
+    if (context) {
+        input.value = context + '\n\n';
+        input.focus();
+        ui.showToast('已带入上游上下文');
+    } else {
+        ui.showToast('暂无上游上下文，先让上一个Agent产出');
+    }
+}
+
+// 把当前小说的大纲摘要插入输入框
+async function agentInsertOutline() {
+    const novel = store.currentNovel;
+    if (!novel) return;
+    let outlineText = '';
+    if (Array.isArray(novel.outline)) {
+        outlineText = novel.outline.map((o, i) => `第${o.chapter}章 ${o.title}: ${o.summary || ''}`).join('\n');
+    }
+    if (!outlineText) {
+        const chapters = await novelManager.listChapters(novel.id);
+        outlineText = chapters.map(c => `第${c.number}章 ${c.title} (${c.wordCount || 0}字)`).join('\n');
+    }
+    const input = document.getElementById('agent-input');
+    input.value = (input.value ? input.value + '\n\n' : '') + `【当前作品大纲】\n${outlineText}`;
+    ui.showToast('已插入大纲');
+}
+
+// 执行当前Agent任务
+async function agentRun() {
+    const def = agentSession.def();
+    const input = document.getElementById('agent-input');
+    const userText = (input.value || '').trim();
+    if (!userText) { ui.showToast('请输入任务内容'); return; }
+
+    const outputBox = document.getElementById('agent-output');
+    outputBox.innerHTML = `<div class="agent-output-loading"><div class="spinner"></div><div>${def.icon} ${def.name} 正在思考…</div></div>`;
+    try {
+        const messages = [{ role: 'system', content: def.systemPrompt }];
+        const ctx = agentSession.getContextFor(def.key);
+        if (ctx) messages.push({ role: 'user', content: `【协作上下文（上游Agent产出，供参考）】\n${ctx}` });
+        messages.push({ role: 'user', content: userText });
+
+        const result = await ai.chat(messages, null, 4000);
+        const time = new Date();
+        agentSession.messages.push({ agent: def.key, content: result, time: time.getTime() });
+        agentSession.history.push({ agent: def.key, input: userText, output: result, time: time.toLocaleTimeString() });
+        await agentSession.save();
+
+        outputBox.innerHTML = `
+            <div class="agent-output-head" style="border-left-color:${def.color}">
+                <span>${def.icon} ${def.name} · ${def.role} 产出</span>
+                <button class="btn btn-sm" onclick="agentCopyOutput(this)">复制</button>
+            </div>
+            <div class="agent-output-body">${escapeHtml(result)}</div>
+            <div class="agent-output-actions">
+                <button class="btn btn-secondary btn-sm" onclick="agentPassNext()">🔗 传递给 ${agentSessionNextName(def.key)}</button>
+                <button class="btn btn-outline btn-sm" onclick="agentRetry()">🔄 重新执行</button>
+            </div>`;
+        agentRenderHistory();
+    } catch (e) {
+        outputBox.innerHTML = `<div class="agent-output-error">❌ ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function agentSessionNextName(currentKey) {
+    const idx = AGENT_DEFS.findIndex(a => a.key === currentKey);
+    const next = AGENT_DEFS[(idx + 1) % AGENT_DEFS.length];
+    return next ? `${next.icon} ${next.name}` : '';
+}
+
+function agentCopyOutput(btn) {
+    const body = btn.closest('.agent-output')?.querySelector('.agent-output-body');
+    if (!body) return;
+    navigator.clipboard?.writeText(body.textContent || '').then(
+        () => ui.showToast('已复制'),
+        () => ui.showToast('复制失败，请长按选择复制')
+    );
+}
+
+// 把当前输出作为下一个Agent的输入并切换角色
+function agentPassNext() {
+    const outputBox = document.getElementById('agent-output');
+    const body = outputBox.querySelector('.agent-output-body');
+    if (!body) { ui.showToast('还没有可传递的输出'); return; }
+    const idx = AGENT_DEFS.findIndex(a => a.key === agentSession.currentAgent);
+    const next = AGENT_DEFS[(idx + 1) % AGENT_DEFS.length];
+    agentSession.switchTo(next.key);
+    const input = document.getElementById('agent-input');
+    input.value = `请基于上面的上下文，${agentTaskHint(next.key)}\n\n${body.textContent}`;
+    agentRefreshTabs();
+    ui.showToast(`已切换到 ${next.name}，上下文已带入`);
+}
+
+function agentTaskHint(key) {
+    return {
+        goethe: '为这段内容规划扩展方向并给出大纲建议',
+        dante: '将上述内容扩写为生动的正文',
+        virgil: '审查上述内容并给出修改意见'
+    }[key] || '继续处理';
+}
+
+function agentRetry() {
+    const input = document.getElementById('agent-input');
+    if (!input) return;
+    agentRun();
+}
+
+// 渲染协作流水线历史
+function agentRenderHistory() {
+    const box = document.getElementById('agent-history');
+    if (!box) return;
+    const h = agentSession.history;
+    if (h.length === 0) { box.innerHTML = ''; return; }
+    box.innerHTML = `
+        <div class="agent-history-title">🗂 协作流水线（${h.length}步）</div>
+        ${h.map((item, i) => {
+            const def = AGENT_DEFS.find(a => a.key === item.agent) || AGENT_DEFS[0];
+            return `<div class="agent-history-item" onclick="agentExpandHistory(${i})">
+                <div class="agent-history-step">${i + 1}</div>
+                <div class="agent-history-info">
+                    <div class="agent-history-name">${def.icon} ${def.name} · ${def.role}</div>
+                    <div class="agent-history-summary">${escapeHtml((item.input || '').substring(0, 60))}</div>
+                </div>
+                <div class="agent-history-time">${item.time || ''}</div>
+            </div>`;
+        }).join('')}`;
+}
+
+function agentExpandHistory(i) {
+    const item = agentSession.history[i];
+    if (!item) return;
+    const def = AGENT_DEFS.find(a => a.key === item.agent) || AGENT_DEFS[0];
+    createModal(`${def.icon} ${def.name} 第${i + 1}步产出`, `
+        <div class="agent-history-modal">
+            <div class="agent-history-modal-label">输入</div>
+            <pre class="agent-history-modal-text">${escapeHtml(item.input)}</pre>
+            <div class="agent-history-modal-label">产出</div>
+            <pre class="agent-history-modal-text">${escapeHtml(item.output)}</pre>
+            <div class="agent-history-modal-actions">
+                <button class="btn btn-primary btn-block" onclick="agentCopyString(this, ${i})">复制产出</button>
+            </div>
+        </div>`);
+}
+
+function agentCopyString(btn, i) {
+    const item = agentSession.history[i];
+    navigator.clipboard?.writeText(item ? item.output : '').then(
+        () => ui.showToast('已复制'),
+        () => ui.showToast('复制失败')
+    );
+}
+
+// 重置当前作品的Agent会话
+async function agentResetSession() {
+    if (!agentSession.novelId) return;
+    agentSession.messages = [];
+    agentSession.history = [];
+    await agentSession.save();
+    const input = document.getElementById('agent-input');
+    if (input) input.value = '';
+    agentRenderHistory();
+    ui.showToast('协作会话已重置');
+}
+
+// ===== 长程一致性检查 (v2.7.0) =====
+const CONSISTENCY_STOPWORDS = new Set([
+    '一个','我们','你们','他们','她们','那个','这个','自己','没有','可以','已经','知道','但是','因为','所以','如果','然后','还是','就是','什么','怎么','不要','起来','下来','出来','过去','时候','现在','刚才','大家','一下','一点','那些','这些','非常','十分','这样','那样','仿佛','似乎','好像','突然','终于','立刻','马上','慢慢','渐渐'
+]);
+
+function consistencyExtractEntities(text, knownNames) {
+    const counts = {};
+    const chapterCounts = {}; // name -> {count, chapters:Set}
+    // 1) 已知角色名直接统计
+    for (const name of (knownNames || [])) {
+        if (!name || name.length < 2) continue;
+        const re = new RegExp(escapeRegExp(name), 'g');
+        const m = text.match(re);
+        if (m) {
+            counts[name] = (counts[name] || 0) + m.length;
+            chapterCounts[name] = chapterCounts[name] || { count: 0, chapters: new Set() };
+        }
+    }
+    // 2) 扫描 2-4 字中文词频（粗略实体发现：连续中文片段滑窗）
+    const cnRun = text.match(/[\u4e00-\u9fa5]{2,4}/g) || [];
+    const freq = {};
+    for (const w of cnRun) {
+        if (CONSISTENCY_STOPWORDS.has(w)) continue;
+        freq[w] = (freq[w] || 0) + 1;
+    }
+    return { counts, chapterCounts, freq };
+}
+
+async function consistencyScanBook(novelId) {
+    const novel = await novelManager.get(novelId);
+    const chapters = await novelManager.listChapters(novelId);
+    // 角色卡与世界观名作为已知实体
+    const characters = await db.getAll('characters', 'novelId', novelId);
+    const worlditems = await db.getAll('worldbuilding', 'novelId', novelId);
+    const knownNames = [
+        ...(characters || []).map(c => c.name).filter(Boolean),
+        ...((novel && Array.isArray(novel.characters)) ? novel.characters.map(c => c.name || c.charName || '') : []),
+        ...(worlditems || []).map(w => w.title).filter(Boolean)
+    ];
+
+    const index = {}; // name -> { total, perChapter: {chNum: count} }
+    for (const ch of chapters) {
+        const text = ch.content || '';
+        const { counts } = consistencyExtractEntities(text, knownNames);
+        for (const [name, count] of Object.entries(counts)) {
+            if (!index[name]) index[name] = { total: 0, perChapter: {} };
+            index[name].total += count;
+            index[name].perChapter[ch.number] = (index[name].perChapter[ch.number] || 0) + count;
+        }
+        // 高频候选：出现 >= 3 次的 2-4 字词（去已知实体去重）
+        const freq = (text.match(/[\u4e00-\u9fa5]{2,4}/g) || []).filter(w => !CONSISTENCY_STOPWORDS.has(w));
+        const freqMap = {};
+        for (const w of freq) freqMap[w] = (freqMap[w] || 0) + 1;
+        for (const [name, count] of Object.entries(freqMap)) {
+            if (count < 3 || index[name]) continue;
+            if (/的|了|着|过|地|得|在|是|有|和|与|及|或|把|被|让|叫|说|道|问|看|听/.test(name)) continue;
+            if (!index[name]) index[name] = { total: 0, perChapter: {} };
+            index[name].total += count;
+            index[name].perChapter[ch.number] = (index[name].perChapter[ch.number] || 0) + count;
+        }
+    }
+    return { index, chapterCount: chapters.length };
+}
+
+function escapeRegExp(str) {
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function renderConsistencyCheck(container, novelId) {
+    const novel = await novelManager.get(novelId);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    store.currentNovel = novel;
+    ui.setPageTitle('🔍 长程一致性检查');
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
+    `);
+    ui.showLoading(container);
+    try {
+        const { index, chapterCount } = await consistencyScanBook(novelId);
+        const entities = Object.entries(index).sort((a, b) => b[1].total - a[1].total);
+        const knownEntities = entities.filter(([name]) => {
+            return name.length >= 2;
+        });
+
+        container.innerHTML = `
+            <div class="consistency-wrap">
+                <div class="consistency-stats">
+                    <div class="consistency-stat"><div class="consistency-stat-num">${chapterCount}</div><div class="consistency-stat-label">章节</div></div>
+                    <div class="consistency-stat"><div class="consistency-stat-num">${entities.length}</div><div class="consistency-stat-label">检测实体</div></div>
+                    <div class="consistency-stat"><div class="consistency-stat-num">${entities.reduce((s, [, v]) => s + v.total, 0)}</div><div class="consistency-stat-label">总出现</div></div>
+                </div>
+
+                <div class="consistency-actions">
+                    <button class="btn btn-primary btn-block" onclick="consistencyRunAI('${novelId}')">🤖 AI 矛盾检测</button>
+                    <div class="consistency-hint">AI 将扫描全书，找出：角色名变体（同一人多种写法）、时间线矛盾、设定冲突</div>
+                </div>
+
+                <div id="consistency-ai-result"></div>
+
+                <div class="consistency-section-title">📑 批量替换（角色改名 / 修正错字）</div>
+                <div class="consistency-replace">
+                    <input id="consistency-old" class="consistency-input" placeholder="原文本（如：李逍遥）">
+                    <input id="consistency-new" class="consistency-input" placeholder="替换为（如：李寒霄）">
+                    <button class="btn btn-primary" onclick="consistencyReplacePreview('${novelId}')">预览</button>
+                </div>
+                <div id="consistency-replace-result"></div>
+
+                <div class="consistency-section-title">🗂 实体索引表（点击展开出现章节）</div>
+                <div id="consistency-entity-list"></div>
+            </div>`;
+
+        const listBox = document.getElementById('consistency-entity-list');
+        if (knownEntities.length === 0) {
+            listBox.innerHTML = '<div class="consistency-empty">全书暂无可索引实体，先写几章正文再回来检查</div>';
+        } else {
+            listBox.innerHTML = knownEntities.slice(0, 80).map(([name, v]) => {
+                const chapters = Object.entries(v.perChapter).sort((a, b) => a[0] - b[0]);
+                return `
+                    <div class="consistency-entity" onclick="consistencyToggleEntity(this)">
+                        <div class="consistency-entity-name">${escapeHtml(name)}</div>
+                        <div class="consistency-entity-count">${v.total}次 · ${chapters.length}章</div>
+                        <div class="consistency-entity-chips">${chapters.slice(0, 12).map(([ch, c]) => `<span class="consistency-entity-chip">${ch}章×${c}</span>`).join('')}${chapters.length > 12 ? `<span class="consistency-entity-chip">…${chapters.length - 12}章</span>` : ''}</div>
+                        <div class="consistency-entity-expand" style="display:none;">${_consistencyExpandChapters(v.perChapter)}</div>
+                    </div>`;
+            }).join('');
+        }
+    } catch (err) {
+        ui.showEmptyState(container, { icon: '⚠️', title: '扫描失败', desc: err.message });
+    }
+}
+
+function consistencyToggleEntity(el) {
+    const expand = el.querySelector('.consistency-entity-expand');
+    if (!expand) return;
+    expand.style.display = expand.style.display === 'none' ? 'block' : 'none';
+}
+
+function _consistencyExpandChapters(perChapter) {
+    return Object.entries(perChapter)
+        .sort((a, b) => Number(a[0]) - Number(b[0]))
+        .map(([ch, c]) => `第${ch}章出现 ${c} 次`)
+        .join('<br>');
+}
+
+async function consistencyRunAI(novelId) {
+    const chapters = await novelManager.listChapters(novelId);
+    if (chapters.length === 0) { ui.showToast('暂无章节'); return; }
+    const box = document.getElementById('consistency-ai-result');
+    box.innerHTML = '<div class="consistency-loading"><div class="spinner"></div><div>AI 正在扫描全书矛盾…</div></div>';
+    try {
+        // 取样：每章前 1200 字，最多 20 章
+        const sampled = chapters.slice(0, 20).map(ch =>
+            `【第${ch.number}章 ${ch.title || ''}】\n${(ch.content || '').substring(0, 1200)}`
+        ).join('\n\n');
+        const result = await ai.chat([
+            { role: 'system', content: '你是资深小说编辑与事实核查员。阅读全书节选，找出：1) 角色名变体（同一角色出现不同名字/昵称误用）；2) 时间线矛盾（事件先后、年龄、天数不符）；3) 设定冲突（力量体系、世界观规则、称呼关系矛盾）。严格输出JSON，不要markdown代码块，格式：{"variants":[{"canonical":"规范名","aliases":["别名1"],"evidence":"出现在第几章"}],"timeline":[{"desc":"矛盾描述","chapter":"第几章"}],"setting":[{"desc":"设定冲突","chapter":"第几章"}]}' },
+            { role: 'user', content: `请分析以下小说节选：\n${sampled}` }
+        ], null, 3000);
+        // 解析 JSON
+        let report = null;
+        try {
+            const cleaned = result.replace(/\`\`\`json?\s*/g, '').replace(/\`\`\`\s*/g, '').trim();
+            report = JSON.parse(cleaned);
+        } catch (_) {
+            const m = result.match(/\{[\s\S]*\}/);
+            if (m) { try { report = JSON.parse(m[0]); } catch (_) {} }
+        }
+        if (!report) { box.innerHTML = '<div class="consistency-error">⚠️ AI 返回无法解析，请重试</div>'; return; }
+        const variants = report.variants || [];
+        const timeline = report.timeline || [];
+        const setting = report.setting || [];
+        const totalIssues = variants.length + timeline.length + setting.length;
+        box.innerHTML = `
+            <div class="consistency-ai-head">AI 检测结果：发现 ${totalIssues} 处潜在问题</div>
+            ${variants.length > 0 ? `
+                <div class="consistency-ai-section">
+                    <div class="consistency-ai-title">🔤 角色名变体（${variants.length}）</div>
+                    ${variants.map(v => `
+                        <div class="consistency-issue-card">
+                            <div class="consistency-issue-main">规范名：<b>${escapeHtml(v.canonical || '?')}</b> · 别名：${(v.aliases || []).map(a => `<span class="consistency-alias">${escapeHtml(a)}</span>`).join(' ')}</div>
+                            ${v.evidence ? `<div class="consistency-issue-evidence">${escapeHtml(v.evidence)}</div>` : ''}
+                            <div class="consistency-issue-actions">
+                                <button class="btn btn-sm btn-primary" onclick="consistencyQuickReplace('${novelId}', '${escapeHtml((v.aliases || [])[0] || '')}', '${escapeHtml(v.canonical || '')}')">统一为规范名</button>
+                            </div>
+                        </div>`).join('')}
+                </div>` : ''}
+            ${timeline.length > 0 ? `
+                <div class="consistency-ai-section">
+                    <div class="consistency-ai-title">⏱ 时间线矛盾（${timeline.length}）</div>
+                    ${timeline.map(t => `<div class="consistency-issue-card"><div class="consistency-issue-main">${escapeHtml(t.desc || '')}</div>${t.chapter ? `<div class="consistency-issue-evidence">${escapeHtml(t.chapter)}</div>` : ''}</div>`).join('')}
+                </div>` : ''}
+            ${setting.length > 0 ? `
+                <div class="consistency-ai-section">
+                    <div class="consistency-ai-title">🌍 设定冲突（${setting.length}）</div>
+                    ${setting.map(t => `<div class="consistency-issue-card"><div class="consistency-issue-main">${escapeHtml(t.desc || '')}</div>${t.chapter ? `<div class="consistency-issue-evidence">${escapeHtml(t.chapter)}</div>` : ''}</div>`).join('')}
+                </div>` : ''}
+            ${totalIssues === 0 ? '<div class="consistency-clean">✅ 未发现明显矛盾（基于节选）</div>' : ''}
+        `;
+    } catch (e) {
+        box.innerHTML = `<div class="consistency-error">❌ ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function consistencyQuickReplace(novelId, oldText, newText) {
+    if (!oldText || !newText || oldText === newText) { ui.showToast('无效替换'); return; }
+    // 填充并立即预览
+    const oldInput = document.getElementById('consistency-old');
+    const newInput = document.getElementById('consistency-new');
+    if (oldInput) oldInput.value = oldText;
+    if (newInput) newInput.value = newText;
+    consistencyReplacePreview(novelId);
+}
+
+async function consistencyReplacePreview(novelId) {
+    const oldText = document.getElementById('consistency-old')?.value.trim();
+    const newText = document.getElementById('consistency-new')?.value.trim();
+    const box = document.getElementById('consistency-replace-result');
+    if (!oldText || !newText) { box.innerHTML = ''; ui.showToast('请输入替换内容'); return; }
+    if (oldText === newText) { box.innerHTML = '<div class="consistency-error">原文本与替换内容相同</div>'; return; }
+    try {
+        const chapters = await novelManager.listChapters(novelId);
+        let affected = 0, totalOccur = 0;
+        const previews = [];
+        for (const ch of chapters) {
+            const content = ch.content || '';
+            const re = new RegExp(escapeRegExp(oldText), 'g');
+            const matches = content.match(re);
+            if (matches && matches.length > 0) {
+                affected++;
+                totalOccur += matches.length;
+                const idx = content.indexOf(oldText);
+                const snippet = content.substring(Math.max(0, idx - 15), idx + oldText.length + 15);
+                previews.push(`第${ch.number}章：…${escapeHtml(snippet)}…`);
+            }
+        }
+        if (affected === 0) { box.innerHTML = '<div class="consistency-error">未找到匹配内容</div>'; return; }
+        box.innerHTML = `
+            <div class="consistency-replace-preview">
+                <div class="consistency-replace-info">将替换 <b>${totalOccur}</b> 处，影响 <b>${affected}</b> 章</div>
+                <div class="consistency-replace-snippets">${previews.slice(0, 8).join('<br>')}${previews.length > 8 ? `<br>…共${previews.length}处示例` : ''}</div>
+                <button class="btn btn-danger" onclick="consistencyReplaceExecute('${novelId}', '${escapeHtml(oldText)}', '${escapeHtml(newText)}', ${affected})">⚠️ 确认替换全部 ${totalOccur} 处</button>
+            </div>`;
+    } catch (e) {
+        box.innerHTML = `<div class="consistency-error">❌ ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function consistencyReplaceExecute(novelId, oldText, newText, affected) {
+    if (!confirm(`确认将「${oldText}」替换为「${newText}」？将影响 ${affected} 个章节，此操作不可撤销。`)) return;
+    try {
+        const chapters = await novelManager.listChapters(novelId);
+        let done = 0;
+        for (const ch of chapters) {
+            if ((ch.content || '').includes(oldText)) {
+                const newContent = ch.content.split(oldText).join(newText);
+                await novelManager.saveChapter(novelId, ch.number, ch.title, newContent, ch.paragraphs);
+                done++;
+            }
+        }
+        const box = document.getElementById('consistency-replace-result');
+        box.innerHTML = `<div class="consistency-clean">✅ 替换完成：${done} 个章节已更新</div>`;
+        ui.showToast(`已替换 ${done} 章`);
+        document.getElementById('consistency-old').value = '';
+        document.getElementById('consistency-new').value = '';
+        // 刷新实体列表
+        setTimeout(() => location.reload(), 1200);
+    } catch (e) {
+        ui.showToast('替换失败: ' + e.message);
     }
 }
