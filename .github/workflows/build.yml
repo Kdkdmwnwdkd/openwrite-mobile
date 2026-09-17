@@ -46,6 +46,15 @@ jobs:
           rm -rf android
           npx cap add android
 
+      - name: Set version from package.json
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          VCODE=$(date +%Y%m%d)
+          echo "Setting versionName=$VERSION versionCode=$VCODE"
+          sed -i "s/versionCode [0-9]*/versionCode $VCODE/" android/app/build.gradle
+          sed -i "s/versionName \"[^\"]*\"/versionName \"$VERSION\"/" android/app/build.gradle
+          grep -nE "versionCode|versionName" android/app/build.gradle
+
       - name: Sync Capacitor
         run: npx cap sync
 
