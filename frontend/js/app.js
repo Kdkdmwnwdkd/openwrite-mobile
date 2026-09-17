@@ -2644,7 +2644,7 @@ async function renderOutlineEditor(container, novelId) {
     `);
 
     const outline = await novelManager.getOutline(novelId);
-    outlineEditData = { novelId, outline };
+    outlineEditData = { novelId, outline, originalOutline: JSON.parse(JSON.stringify(outline)) };
 
     container.innerHTML = `
         <div style="padding: 12px 16px;">
@@ -2796,8 +2796,236 @@ function applyOutlineAddChild(path) {
 async function saveOutlineEdit() {
     if (!outlineEditData) return;
     try {
+        // 1. 检测冲突
+        const conflicts = await detectOutlineConflicts(outlineEditData.novelId, outlineEditData.originalOutline, outlineEditData.outline);
+        if (conflicts.length > 0) {
+            showConflictReport(outlineEditData.novelId, conflicts);
+            return; // 等用户确认后再保存
+        }
+        // 无冲突，直接保存
         await novelManager.saveOutline(outlineEditData.novelId, outlineEditData.outline);
         ui.showToast('大纲已保存');
+    } catch (e) {
+        ui.showToast('保存失败: ' + e.message);
+    }
+}
+
+// ===== Outline Conflict Detection =====
+
+function flattenOutlineNodes(node, list = [], path = '') {
+    if (!node) return list;
+    const currentPath = path ? `${path} / ${node.title || node.id}` : (node.title || node.id);
+    if (node.type !== 'root') {
+        list.push({ path: currentPath, node: JSON.parse(JSON.stringify(node)) });
+    }
+    if (node.children) {
+        for (const child of node.children) {
+            flattenOutlineNodes(child, list, currentPath);
+        }
+    }
+    return list;
+}
+
+function diffOutlines(oldTree, newTree) {
+    const oldFlat = flattenOutlineNodes(oldTree);
+    const newFlat = flattenOutlineNodes(newTree);
+    const changes = [];
+    // 用路径+type+id匹配
+    const oldMap = new Map(oldFlat.map(o => [`${o.path}|${o.node.type}|${o.node.id}`, o.node]));
+    const newMap = new Map(newFlat.map(n => [`${n.path}|${n.node.type}|${n.node.id}`, n.node]));
+
+    // 检测修改和删除
+    for (const [key, oldNode] of oldMap) {
+        const newNode = newMap.get(key);
+        if (!newNode) {
+            changes.push({ type: 'deleted', path: key.split('|')[0], node: oldNode });
+        } else if (JSON.stringify(oldNode) !== JSON.stringify(newNode)) {
+            const diffs = [];
+            if (oldNode.title !== newNode.title) diffs.push({ field: 'title', old: oldNode.title, new: newNode.title });
+            if (oldNode.summary !== newNode.summary) diffs.push({ field: 'summary', old: oldNode.summary, new: newNode.summary });
+            if (oldNode.type !== newNode.type) diffs.push({ field: 'type', old: oldNode.type, new: newNode.type });
+            if (diffs.length > 0) {
+                changes.push({ type: 'modified', path: key.split('|')[0], node: newNode, diffs });
+            }
+        }
+    }
+    // 检测新增
+    for (const [key, newNode] of newMap) {
+        if (!oldMap.has(key)) {
+            changes.push({ type: 'added', path: key.split('|')[0], node: newNode });
+        }
+    }
+    return changes;
+}
+
+async function detectOutlineConflicts(novelId, oldOutline, newOutline) {
+    const changes = diffOutlines(oldOutline, newOutline);
+    if (changes.length === 0) return [];
+
+    const chapters = await novelManager.listChapters(novelId);
+    if (chapters.length === 0) return []; // 没写过章节，无冲突
+
+    const conflicts = [];
+
+    for (const change of changes) {
+        if (change.type === 'deleted') continue; // 删除暂不检测
+        if (change.type === 'added') continue; // 新增无冲突
+        if (change.type !== 'modified') continue;
+
+        const relevantDiffs = change.diffs.filter(d => d.field === 'title' || d.field === 'summary');
+        if (relevantDiffs.length === 0) continue;
+
+        // 提取旧文本中的关键实体（角色名、地点、关键事件词）
+        const oldText = change.diffs.map(d => d.old).join(' ');
+        const keywords = extractKeywords(oldText);
+        if (keywords.length === 0) continue;
+
+        for (const ch of chapters) {
+            const content = ch.content || '';
+            const found = keywords.filter(kw => content.includes(kw));
+            if (found.length > 0) {
+                // 找出具体出现位置（前200字符上下文）
+                const positions = [];
+                for (const kw of found) {
+                    let idx = content.indexOf(kw);
+                    while (idx !== -1) {
+                        const start = Math.max(0, idx - 60);
+                        const end = Math.min(content.length, idx + kw.length + 60);
+                        positions.push({ keyword: kw, index: idx, context: content.substring(start, end) });
+                        idx = content.indexOf(kw, idx + 1);
+                    }
+                }
+                conflicts.push({
+                    change,
+                    chapter: ch,
+                    keywords: found,
+                    positions: positions.slice(0, 5), // 最多5处
+                    severity: found.length >= 3 ? 'high' : 'medium'
+                });
+                break; // 一个变更只需报告一次冲突
+            }
+        }
+    }
+
+    return conflicts;
+}
+
+function extractKeywords(text) {
+    if (!text) return [];
+    // 简单提取：中文2-6字词组、角色名（假设为大写首字母或特定称谓）
+    const words = [];
+    // 提取引号内内容（角色名、地点名）
+    const quoted = text.match(/["""']([^"""']{2,8})["""']/g);
+    if (quoted) words.push(...quoted.map(q => q.replace(/["""']/g, '')));
+    // 提取常见称谓+名字
+    const titles = text.match(/[甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥东西南北中]+[君王帝主公爷侯伯子男]+/g);
+    if (titles) words.push(...titles);
+    // 提取2-4字中文词（可能是角色名或地名）
+    const segments = text.match(/[\u4e00-\u9fa5]{2,4}/g);
+    if (segments) {
+        // 过滤常见虚词
+        const stopWords = new Set(['但是', '因为', '所以', '如果', '然后', '之后', '之前', '此时', '这里', '那里', '这个', '那个', '什么', '怎么', '如何', '开始', '结束', '继续', '突然', '慢慢', '很快', '终于']);
+        words.push(...segments.filter(s => !stopWords.has(s) && s.length >= 2));
+    }
+    // 去重
+    return [...new Set(words)].filter(w => w.length >= 2 && w.length <= 8);
+}
+
+function showConflictReport(novelId, conflicts) {
+    const totalChapters = new Set(conflicts.map(c => c.chapter.number)).size;
+    const totalPositions = conflicts.reduce((sum, c) => sum + c.positions.length, 0);
+
+    const html = `
+        <div style="max-height:60vh;overflow-y:auto;">
+            <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);border-radius:10px;padding:12px;margin-bottom:16px;">
+                <div style="font-weight:600;color:#ef4444;margin-bottom:4px;">⚠️ 检测到 ${conflicts.length} 处潜在冲突</div>
+                <div style="font-size:13px;color:var(--text-secondary);">
+                    涉及 ${totalChapters} 个已写章节，共 ${totalPositions} 处引用。
+                    建议先查看冲突，再决定是否同步修改。
+                </div>
+            </div>
+            ${conflicts.map((c, i) => `
+                <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px;">
+                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+                        <span style="font-size:12px;padding:2px 8px;border-radius:6px;background:${c.severity==='high'?'rgba(239,68,68,0.1);color:#ef4444':'rgba(245,158,11,0.1);color:#f59e0b'}">${c.severity==='high'?'高风险':'中风险'}</span>
+                        <span style="font-weight:500;">${escapeHtml(c.change.path)}</span>
+                    </div>
+                    <div style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">
+                        ${c.change.diffs.map(d => `
+                            <div style="margin-bottom:4px;">
+                                <span style="color:#ef4444;text-decoration:line-through;">${escapeHtml(String(d.old || ''))}</span>
+                                <span style="margin:0 4px;">→</span>
+                                <span style="color:#10b981;">${escapeHtml(String(d.new || ''))}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:8px;">
+                        第${c.chapter.number}章《${c.chapter.title}》中发现引用：${c.keywords.join('、')}
+                    </div>
+                    ${c.positions.map(p => `
+                        <div style="background:var(--bg);border-radius:6px;padding:8px;margin-bottom:4px;font-size:13px;font-family:monospace;white-space:pre-wrap;">
+                            <span style="color:var(--text-tertiary);">…</span>${escapeHtml(p.context.substring(0, p.context.indexOf(p.keyword)))}<span style="background:rgba(239,68,68,0.15);color:#ef4444;border-radius:2px;padding:0 2px;">${escapeHtml(p.keyword)}</span>${escapeHtml(p.context.substring(p.context.indexOf(p.keyword) + p.keyword.length))}<span style="color:var(--text-tertiary);">…</span>
+                        </div>
+                    `).join('')}
+                </div>
+            `).join('')}
+            <div style="display:flex;gap:8px;margin-top:16px;">
+                <button class="btn btn-primary btn-block" onclick="applyConflictSync('${novelId}')">🔄 一键同步修改</button>
+                <button class="btn btn-outline btn-block" onclick="forceSaveOutline('${novelId}')">⚠️ 忽略冲突，仅保存大纲</button>
+            </div>
+        </div>
+    `;
+    const modal = createModal('大纲冲突检测报告', html);
+    modal.show();
+}
+
+async function applyConflictSync(novelId) {
+    if (!confirm('同步修改将批量替换已写章节中的旧引用为新引用，此操作不可撤销，确定继续吗？')) return;
+    closeModal();
+    const { originalOutline, outline } = outlineEditData || {};
+    if (!originalOutline || !outline) { ui.showToast('数据异常'); return; }
+
+    const changes = diffOutlines(originalOutline, outline);
+    const modifiedChanges = changes.filter(c => c.type === 'modified');
+    if (modifiedChanges.length === 0) { ui.showToast('无需要同步的修改'); return; }
+
+    ui.showToast('正在同步修改…');
+    const chapters = await novelManager.listChapters(novelId);
+    let replacedCount = 0;
+
+    for (const ch of chapters) {
+        let newContent = ch.content || '';
+        let hasChange = false;
+        for (const change of modifiedChanges) {
+            for (const diff of change.diffs) {
+                if (diff.field !== 'title' && diff.field !== 'summary') continue;
+                const oldVal = String(diff.old || '');
+                const newVal = String(diff.new || '');
+                if (!oldVal || oldVal === newVal) continue;
+                // 全词替换（避免部分匹配）
+                const regex = new RegExp(oldVal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+                if (regex.test(newContent)) {
+                    newContent = newContent.replace(regex, newVal);
+                    hasChange = true;
+                    replacedCount++;
+                }
+            }
+        }
+        if (hasChange) {
+            await novelManager.saveChapter(novelId, ch.number, ch.title, newContent);
+        }
+    }
+
+    // 保存大纲
+    await novelManager.saveOutline(novelId, outline);
+    ui.showToast(`同步完成：修改了 ${replacedCount} 处引用，已保存大纲`);
+}
+
+async function forceSaveOutline(novelId) {
+    closeModal();
+    try {
+        await novelManager.saveOutline(outlineEditData.novelId, outlineEditData.outline);
+        ui.showToast('大纲已保存（冲突未处理）');
     } catch (e) {
         ui.showToast('保存失败: ' + e.message);
     }
