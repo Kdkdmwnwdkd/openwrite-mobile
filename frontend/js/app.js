@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.3.0',
+    VERSION: '2.4.0',
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 4
@@ -419,6 +419,75 @@ const novelManager = {
             totalChapters: novels.reduce((sum, n) => sum + (n.chapterCount || 0), 0),
             totalWords: novels.reduce((sum, n) => sum + (n.wordCount || 0), 0)
         };
+    },
+
+    // ===== Outline Evolution (v2.4.0) =====
+    async getOutline(novelId) {
+        const novel = await this.get(novelId);
+        if (!novel) return null;
+        // 兼容旧版 flat array → 包装为树
+        const raw = novel.outline;
+        if (Array.isArray(raw) && raw.length > 0 && raw[0].chapter !== undefined) {
+            // 旧格式：flat array of {chapter, title, summary}
+            return {
+                id: 'root',
+                type: 'root',
+                title: novel.title,
+                summary: novel.description || '',
+                children: raw.map(o => ({
+                    id: `ch_${o.chapter}`,
+                    type: 'chapter',
+                    chapterNum: o.chapter,
+                    title: o.title || `第${o.chapter}章`,
+                    summary: o.summary || '',
+                    children: []
+                }))
+            };
+        }
+        // 新格式或空
+        return raw || {
+            id: 'root',
+            type: 'root',
+            title: novel.title,
+            summary: novel.description || '',
+            children: []
+        };
+    },
+
+    async saveOutline(novelId, outline) {
+        const novel = await this.get(novelId);
+        if (!novel) throw new Error('作品不存在');
+        novel.outline = outline;
+        novel.updated = Date.now();
+        await db.put('novels', novel);
+    },
+
+    async getBeats(novelId, chapterNum) {
+        const novel = await this.get(novelId);
+        if (!novel || !novel.beats) return [];
+        return novel.beats[chapterNum] || [];
+    },
+
+    async saveBeats(novelId, chapterNum, beats) {
+        const novel = await this.get(novelId);
+        if (!novel) throw new Error('作品不存在');
+        if (!novel.beats) novel.beats = {};
+        novel.beats[chapterNum] = beats;
+        novel.updated = Date.now();
+        await db.put('novels', novel);
+    },
+
+    async getPlotBranches(novelId) {
+        const novel = await this.get(novelId);
+        return novel ? (novel.plotBranches || []) : [];
+    },
+
+    async savePlotBranches(novelId, branches) {
+        const novel = await this.get(novelId);
+        if (!novel) throw new Error('作品不存在');
+        novel.plotBranches = branches;
+        novel.updated = Date.now();
+        await db.put('novels', novel);
     }
 };
 
@@ -502,7 +571,13 @@ function navigateTo(page, params = {}) {
         // 参数配置
         paramConfig: renderParamConfig,
         // 数据管理
-        dataManage: renderDataManage
+        dataManage: renderDataManage,
+        // 大纲编辑器
+        outlineEditor: () => renderOutlineEditor(params.novelId),
+        // 情节推演
+        plotSimulate: () => renderPlotSimulate(params.novelId),
+        // 节拍控制
+        beatControl: () => renderBeatControl(params.novelId, params.chapterNum)
     };
 
     if (renderers[page]) renderers[page](view);
@@ -827,6 +902,11 @@ async function renderNovelDetail(container, novelId) {
                 <button class="btn btn-secondary" onclick="aiWriteNext('${novelId}')">🤖 AI续写</button>
             </div>
 
+            <div class="action-buttons-row" style="margin-bottom: 12px;">
+                <button class="btn btn-outline" onclick="navigateTo('outlineEditor', { novelId: '${novelId}' })">📋 编辑大纲</button>
+                <button class="btn btn-outline" onclick="navigateTo('plotSimulate', { novelId: '${novelId}' })">🔮 情节推演</button>
+            </div>
+
             <!-- 目录树形结构 -->
             <div class="novel-tree">
                 <!-- 大纲 -->
@@ -920,6 +1000,9 @@ async function renderChapterEdit(container, novelId, chapterNum) {
         <div class="action-buttons-row" style="margin-top: 12px;">
             <button class="btn btn-secondary" onclick="reviewThisChapter('${novelId}', ${chapterNum})">🔍 AI审稿</button>
             <button class="btn btn-primary" onclick="aiContinueChapter('${novelId}', ${chapterNum})">✨ AI续写</button>
+        </div>
+        <div class="action-buttons-row" style="margin-top: 8px;">
+            <button class="btn btn-outline" onclick="navigateTo('beatControl', { novelId: '${novelId}', chapterNum: ${chapterNum} })">🎬 节拍控制</button>
         </div>
     `;
 }
@@ -2546,4 +2629,413 @@ async function viewCharacter(novelId, index) {
         </div>
     `);
     modal.show();
+}
+
+// ===== Outline Editor Page (v2.4.0) =====
+let outlineEditData = null; // { novelId, outline }
+
+async function renderOutlineEditor(container, novelId) {
+    const novel = await novelManager.get(novelId);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    ui.setPageTitle('大纲编辑');
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
+        <button class="header-btn" onclick="saveOutlineEdit()">保存</button>
+    `);
+
+    const outline = await novelManager.getOutline(novelId);
+    outlineEditData = { novelId, outline };
+
+    container.innerHTML = `
+        <div style="padding: 12px 16px;">
+            <div style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 12px;">
+                📋 树形大纲：总纲 → 卷 → 章 → 节。点击节点可折叠/展开，点击 ✎ 可编辑。
+            </div>
+            <div id="outline-tree-root" class="novel-tree"></div>
+        </div>
+    `;
+    renderOutlineNode(document.getElementById('outline-tree-root'), outline, 'root');
+}
+
+function renderOutlineNode(container, node, path) {
+    if (!node) return;
+    const hasChildren = node.children && node.children.length > 0;
+    const isRoot = node.type === 'root';
+    const icon = isRoot ? '📚' : node.type === 'volume' ? '📖' : node.type === 'chapter' ? '📄' : '•';
+    const count = hasChildren ? `(${node.children.length})` : '';
+
+    const row = document.createElement('div');
+    row.className = `outline-node ${hasChildren ? '' : 'leaf'}`;
+    row.dataset.path = path;
+
+    row.innerHTML = `
+        <div class="outline-node-row" onclick="toggleOutlineNode(this)">
+            <span class="outline-toggle" style="visibility:${hasChildren ? 'visible' : 'hidden'}">▼</span>
+            <span class="outline-icon">${icon}</span>
+            <div class="outline-text">
+                <div class="outline-title">${escapeHtml(node.title || node.id)} ${count}</div>
+                <div class="outline-summary">${escapeHtml(node.summary || '')}</div>
+            </div>
+            <button class="outline-menu-btn" onclick="event.stopPropagation(); showOutlineNodeMenu('${path}')">✎</button>
+        </div>
+        <div class="outline-children" id="oc-${path}"></div>
+    `;
+    container.appendChild(row);
+
+    if (hasChildren) {
+        const childBox = row.querySelector(`#oc-${CSS.escape(path)}`);
+        if (!childBox) return;
+        node.children.forEach((child, idx) => {
+            renderOutlineNode(childBox, child, `${path}_c${idx}`);
+        });
+    }
+}
+
+function toggleOutlineNode(el) {
+    const node = el.closest('.outline-node');
+    if (!node) return;
+    const children = node.querySelector('.outline-children');
+    const toggle = node.querySelector('.outline-toggle');
+    if (!children) return;
+    const collapsed = node.classList.toggle('collapsed');
+    if (toggle) toggle.textContent = collapsed ? '▶' : '▼';
+}
+
+function showOutlineNodeMenu(path) {
+    const { outline } = outlineEditData || {};
+    const node = findOutlineNode(outline, path);
+    if (!node) return;
+    const modal = createModal('编辑节点', `
+        <div style="display:flex;flex-direction:column;gap:12px;">
+            <div><label style="font-size:13px;color:var(--text-secondary);display:block;margin-bottom:4px;">标题</label>
+            <input type="text" class="input" id="on-title" value="${escapeHtml(node.title || '')}"></div>
+            <div><label style="font-size:13px;color:var(--text-secondary);display:block;margin-bottom:4px;">概要</label>
+            <textarea class="textarea" id="on-summary" rows="3">${escapeHtml(node.summary || '')}</textarea></div>
+            <div style="display:flex;gap:8px;">
+                <button class="btn btn-primary btn-block" onclick="applyOutlineEdit('${path}')">保存</button>
+                ${node.type !== 'root' ? `<button class="btn btn-outline btn-block" onclick="applyOutlineDelete('${path}')">删除</button>` : ''}
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px;">
+                <div style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">添加子节点</div>
+                <div style="display:flex;gap:8px;">
+                    <select class="input" id="on-add-type" style="width:100px;flex-shrink:0;">
+                        <option value="volume">卷</option>
+                        <option value="chapter">章</option>
+                        <option value="scene">节</option>
+                    </select>
+                    <input type="text" class="input" id="on-add-title" placeholder="标题" style="flex:1;">
+                </div>
+                <button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="applyOutlineAddChild('${path}')">添加子节点</button>
+            </div>
+        </div>`);
+    modal.show();
+}
+
+function findOutlineNode(outline, path) {
+    if (!outline || path === 'root') return outline;
+    const parts = path.split('_');
+    let cur = outline;
+    for (let i = 1; i < parts.length; i++) {
+        const idx = parseInt(parts[i].replace('c', ''), 10);
+        if (!cur.children || !cur.children[idx]) return null;
+        cur = cur.children[idx];
+    }
+    return cur;
+}
+
+function applyOutlineEdit(path) {
+    const title = document.getElementById('on-title').value.trim();
+    const summary = document.getElementById('on-summary').value.trim();
+    const node = findOutlineNode(outlineEditData.outline, path);
+    if (!node) return;
+    node.title = title;
+    node.summary = summary;
+    closeModal();
+    const root = document.getElementById('outline-tree-root');
+    root.innerHTML = '';
+    renderOutlineNode(root, outlineEditData.outline, 'root');
+    ui.showToast('已修改（未保存到数据库，请点击右上角保存）');
+}
+
+function applyOutlineDelete(path) {
+    if (!path || path === 'root') return;
+    closeModal();
+    const parentPath = path.substring(0, path.lastIndexOf('_'));
+    const idx = parseInt(path.split('_').pop().replace('c', ''), 10);
+    const parent = findOutlineNode(outlineEditData.outline, parentPath);
+    if (parent && parent.children) {
+        parent.children.splice(idx, 1);
+    }
+    const root = document.getElementById('outline-tree-root');
+    root.innerHTML = '';
+    renderOutlineNode(root, outlineEditData.outline, 'root');
+    ui.showToast('已删除（未保存到数据库，请点击右上角保存）');
+}
+
+function applyOutlineAddChild(path) {
+    const type = document.getElementById('on-add-type').value;
+    const title = document.getElementById('on-add-title').value.trim();
+    if (!title) { ui.showToast('请输入标题'); return; }
+    const node = findOutlineNode(outlineEditData.outline, path);
+    if (!node) return;
+    if (!node.children) node.children = [];
+    node.children.push({
+        id: `${type}_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+        type,
+        title,
+        summary: '',
+        children: []
+    });
+    closeModal();
+    const root = document.getElementById('outline-tree-root');
+    root.innerHTML = '';
+    renderOutlineNode(root, outlineEditData.outline, 'root');
+    ui.showToast('已添加（未保存到数据库，请点击右上角保存）');
+}
+
+async function saveOutlineEdit() {
+    if (!outlineEditData) return;
+    try {
+        await novelManager.saveOutline(outlineEditData.novelId, outlineEditData.outline);
+        ui.showToast('大纲已保存');
+    } catch (e) {
+        ui.showToast('保存失败: ' + e.message);
+    }
+}
+
+// ===== Plot Simulation Page (v2.4.0) =====
+async function renderPlotSimulate(container, novelId) {
+    const novel = await novelManager.get(novelId);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    ui.setPageTitle('情节推演');
+    ui.setHeaderActions(`<button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>`);
+
+    const branches = await novelManager.getPlotBranches(novelId);
+
+    container.innerHTML = `
+        <div style="padding: 12px 16px;">
+            <div style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 12px;">
+                🔮 输入一个"如果…会怎样"的假设，AI 推演后续 3 章的因果链。
+            </div>
+            <textarea class="textarea" id="plot-assume" rows="3" placeholder="例如：如果主角在第5章发现师父是反派，后续剧情会怎样发展？"></textarea>
+            <button class="btn btn-primary btn-block" style="margin-top: 12px;" onclick="runPlotSimulate('${novelId}')">开始推演</button>
+            <div id="plot-result" style="margin-top: 16px;"></div>
+            <div id="plot-history" style="margin-top: 16px;"></div>
+        </div>
+    `;
+
+    if (branches.length > 0) {
+        const hist = document.getElementById('plot-history');
+        hist.innerHTML = `<div style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">历史推演</div>` +
+            branches.slice(-5).reverse().map(b => `
+                <div class="card" style="margin-bottom:8px;">
+                    <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:4px;">${new Date(b.created).toLocaleString()}</div>
+                    <div style="font-weight:500;margin-bottom:6px;">假设：${escapeHtml(b.assumption)}</div>
+                    <div style="font-size:13px;color:var(--text-secondary);white-space:pre-wrap;">${escapeHtml(b.result)}</div>
+                </div>
+            `).join('');
+    }
+}
+
+async function runPlotSimulate(novelId) {
+    const assume = document.getElementById('plot-assume').value.trim();
+    if (!assume) { ui.showToast('请输入假设条件'); return; }
+    const novel = await novelManager.get(novelId);
+    const chapters = await novelManager.listChapters(novelId);
+    const outline = await novelManager.getOutline(novelId);
+    const resultBox = document.getElementById('plot-result');
+    resultBox.innerHTML = `<div class="loading"><div class="spinner"></div><div>AI 正在推演…</div></div>`;
+
+    const context = chapters.slice(-2).map(ch => `第${ch.number}章 ${ch.title}：${ch.content.substring(0, 400)}`).join('\n');
+    const outlineSummary = (outline?.children || []).slice(0, 5).map(o => o.title).join(' → ');
+
+    try {
+        const prompt = `你是小说情节推演专家。请基于以下信息推演后续剧情：
+
+作品：${novel.title}
+简介：${novel.description || ''}
+最近章节概要：
+${context}
+当前大纲：${outlineSummary}
+
+假设条件：${assume}
+
+要求：
+1. 给出后续 3 章的情节推演（每章包含标题+核心事件+对整体故事的影响）
+2. 分析该假设对角色关系、世界观、主线节奏的影响
+3. 标注潜在风险（伏笔断裂、节奏失衡、角色OOC）
+
+请用中文输出。`;
+        const result = await ai.chat([
+            { role: 'system', content: '你是专业的小说情节推演师，擅长因果链分析与多章节节奏规划。' },
+            { role: 'user', content: prompt }
+        ], null, 4000);
+
+        const branch = { assumption: assume, result, created: Date.now() };
+        const branches = await novelManager.getPlotBranches(novelId);
+        branches.push(branch);
+        await novelManager.savePlotBranches(novelId, branches);
+
+        resultBox.innerHTML = `
+            <div class="card" style="margin-bottom:12px;">
+                <div style="font-weight:600;margin-bottom:8px;">🔮 推演结果</div>
+                <div style="font-size:14px;line-height:1.8;white-space:pre-wrap;color:var(--text);">${escapeHtml(result).replace(/\n/g, '<br>')}</div>
+            </div>`;
+    } catch (e) {
+        resultBox.innerHTML = `<div style="color:var(--error);">推演失败: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+// ===== Beat Control Page (v2.4.0) =====
+let beatEditData = null;
+
+async function renderBeatControl(container, novelId, chapterNum) {
+    const novel = await novelManager.get(novelId);
+    const chapter = await novelManager.getChapter(novelId, chapterNum);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    ui.setPageTitle(`第${chapterNum}章 节拍控制`);
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
+        <button class="header-btn" onclick="saveBeatControl()">保存</button>
+    `);
+
+    let beats = await novelManager.getBeats(novelId, chapterNum);
+    if (!beats || beats.length === 0) {
+        beats = [
+            { type: 'setup', label: '铺陈', desc: '', pct: 25 },
+            { type: 'conflict', label: '冲突', desc: '', pct: 25 },
+            { type: 'climax', label: '高潮', desc: '', pct: 25 },
+            { type: 'hook', label: '钩子', desc: '', pct: 25 }
+        ];
+    }
+    beatEditData = { novelId, chapterNum, beats };
+
+    const renderBeats = () => `
+        ${beats.map((b, i) => `
+            <div class="beat-item" data-idx="${i}">
+                <div class="beat-num">${i + 1}</div>
+                <div style="flex:1;">
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                        <select class="input" id="beat-type-${i}" style="width:90px;flex-shrink:0;padding:6px 8px;font-size:13px;">
+                            <option value="setup" ${b.type==='setup'?'selected':''}>铺陈</option>
+                            <option value="conflict" ${b.type==='conflict'?'selected':''}>冲突</option>
+                            <option value="climax" ${b.type==='climax'?'selected':''}>高潮</option>
+                            <option value="hook" ${b.type==='hook'?'selected':''}>钩子</option>
+                            <option value="transition" ${b.type==='transition'?'selected':''}>过渡</option>
+                        </select>
+                        <input type="number" class="input" id="beat-pct-${i}" value="${b.pct}" min="1" max="100" style="width:70px;flex-shrink:0;padding:6px 8px;font-size:13px;text-align:center;">%
+                        <button class="btn btn-outline" style="padding:4px 8px;font-size:12px;" onclick="removeBeat(${i})">✕</button>
+                    </div>
+                    <input type="text" class="input" id="beat-desc-${i}" value="${escapeHtml(b.desc || '')}" placeholder="描述该节拍的核心内容…" style="font-size:13px;padding:8px;">
+                </div>
+            </div>
+        `).join('')}
+        <button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="addBeat()">+ 添加节拍</button>
+    `;
+
+    container.innerHTML = `
+        <div style="padding: 12px 16px;">
+            <div style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 12px;">
+                🎬 定义本章的叙事节奏。AI 写作时将按节拍分配篇幅与情绪强度。
+            </div>
+            <div id="beat-list">${renderBeats()}</div>
+            <button class="btn btn-primary btn-block" style="margin-top: 12px;" onclick="aiCheckBeats('${novelId}', ${chapterNum})">🤖 AI 校验节拍</button>
+            <div id="beat-check-result" style="margin-top: 12px;"></div>
+        </div>
+    `;
+}
+
+function addBeat() {
+    if (!beatEditData) return;
+    beatEditData.beats.push({ type: 'transition', label: '过渡', desc: '', pct: 20 });
+    const container = document.getElementById('beat-list');
+    if (container) {
+        const novelId = beatEditData.novelId;
+        const chapterNum = beatEditData.chapterNum;
+        const beats = beatEditData.beats;
+        container.innerHTML = beats.map((b, i) => `
+            <div class="beat-item" data-idx="${i}">
+                <div class="beat-num">${i + 1}</div>
+                <div style="flex:1;">
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                        <select class="input" id="beat-type-${i}" style="width:90px;flex-shrink:0;padding:6px 8px;font-size:13px;">
+                            <option value="setup" ${b.type==='setup'?'selected':''}>铺陈</option>
+                            <option value="conflict" ${b.type==='conflict'?'selected':''}>冲突</option>
+                            <option value="climax" ${b.type==='climax'?'selected':''}>高潮</option>
+                            <option value="hook" ${b.type==='hook'?'selected':''}>钩子</option>
+                            <option value="transition" ${b.type==='transition'?'selected':''}>过渡</option>
+                        </select>
+                        <input type="number" class="input" id="beat-pct-${i}" value="${b.pct}" min="1" max="100" style="width:70px;flex-shrink:0;padding:6px 8px;font-size:13px;text-align:center;">%
+                        <button class="btn btn-outline" style="padding:4px 8px;font-size:12px;" onclick="removeBeat(${i})">✕</button>
+                    </div>
+                    <input type="text" class="input" id="beat-desc-${i}" value="${escapeHtml(b.desc || '')}" placeholder="描述该节拍的核心内容…" style="font-size:13px;padding:8px;">
+                </div>
+            </div>
+        `).join('') + `<button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="addBeat()">+ 添加节拍</button>`;
+    }
+}
+
+function removeBeat(idx) {
+    if (!beatEditData) return;
+    beatEditData.beats.splice(idx, 1);
+    addBeat(); // re-render
+}
+
+async function saveBeatControl() {
+    if (!beatEditData) return;
+    const { novelId, chapterNum } = beatEditData;
+    const beats = [];
+    const container = document.getElementById('beat-list');
+    if (!container) return;
+    const items = container.querySelectorAll('.beat-item');
+    items.forEach((el, i) => {
+        const type = document.getElementById(`beat-type-${i}`)?.value || 'transition';
+        const pct = parseInt(document.getElementById(`beat-pct-${i}`)?.value || '20', 10);
+        const desc = document.getElementById(`beat-desc-${i}`)?.value || '';
+        beats.push({ type, label: type==='setup'?'铺陈':type==='conflict'?'冲突':type==='climax'?'高潮':type==='hook'?'钩子':'过渡', desc, pct });
+    });
+    await novelManager.saveBeats(novelId, chapterNum, beats);
+    ui.showToast('节拍已保存');
+}
+
+async function aiCheckBeats(novelId, chapterNum) {
+    const novel = await novelManager.get(novelId);
+    const chapter = await novelManager.getChapter(novelId, chapterNum);
+    const beats = beatEditData?.beats || await novelManager.getBeats(novelId, chapterNum);
+    const resultBox = document.getElementById('beat-check-result');
+    resultBox.innerHTML = `<div class="loading"><div class="spinner"></div><div>AI 正在分析…</div></div>`;
+
+    try {
+        const beatText = beats.map((b, i) => `${i + 1}. ${b.label}（${b.pct}%）：${b.desc}`).join('\n');
+        const content = chapter ? chapter.content.substring(0, 1500) : '（本章尚未写作）';
+        const prompt = `你是小说节奏分析专家。请分析以下章节节拍规划是否合理：
+
+作品：${novel.title}
+章节：第${chapterNum}章 ${chapter?.title || ''}
+
+规划节拍：
+${beatText}
+
+${chapter ? '本章内容节选：\n' + content : ''}
+
+要求：
+1. 评估节拍比例是否合理（铺陈不宜过长、高潮应有足够张力、钩子是否足够吸引）
+2. 如果已有内容，对比实际写作是否符合节拍规划
+3. 给出优化建议（哪里该加/减、哪里情绪该收/放）
+
+请用中文输出。`;
+
+        const result = await ai.chat([
+            { role: 'system', content: '你是资深小说编辑，擅长叙事节奏分析与节拍控制。' },
+            { role: 'user', content: prompt }
+        ], null, 4000);
+
+        resultBox.innerHTML = `
+            <div class="card" style="margin-bottom:12px;">
+                <div style="font-weight:600;margin-bottom:8px;">🎬 AI 节拍分析</div>
+                <div style="font-size:14px;line-height:1.8;white-space:pre-wrap;color:var(--text);">${escapeHtml(result).replace(/\n/g, '<br>')}</div>
+            </div>`;
+    } catch (e) {
+        resultBox.innerHTML = `<div style="color:var(--error);">分析失败: ${escapeHtml(e.message)}</div>`;
+    }
 }
