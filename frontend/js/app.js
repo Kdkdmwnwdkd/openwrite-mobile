@@ -668,7 +668,15 @@ const ui = {
 };
 
 // ===== Page Navigation =====
-function navigateTo(page, params = {}) {
+let pageHistory = [];
+
+function navigateTo(page, params = {}, isRootTab = false) {
+    if (!isRootTab) {
+        pageHistory.push({ page: store.currentPage, params: {} });
+    } else {
+        pageHistory = [];
+    }
+    
     store.currentPage = page;
     document.querySelectorAll('.nav-item').forEach(item => {
         item.classList.toggle('active', item.dataset.page === page);
@@ -768,11 +776,11 @@ function renderChat(container) {
 
             <!-- 操作卡片 -->
             <div class="chat-action-list">
-                <div class="chat-action-card" onclick="showCreateNovelModal()">
+                <div class="chat-action-card" onclick="createNovelWithAI()">
                     <div class="chat-action-icon" style="background: linear-gradient(135deg, #ede9fe, #ddd6fe);">📚</div>
                     <div class="chat-action-body">
                         <div class="chat-action-title">新书启航</div>
-                        <div class="chat-action-desc">初始化小说项目，创建目录结构</div>
+                        <div class="chat-action-desc">AI 对话式创建，只需输入类型和书名</div>
                     </div>
                     <span class="chat-action-arrow">›</span>
                 </div>
@@ -936,7 +944,7 @@ function webSearch() { ui.showToast('联网搜索功能开发中...'); }
 async function renderBookshelf(container) {
     ui.setPageTitle('我的小说');
     ui.setHeaderActions(`
-        <button class="header-btn" onclick="showCreateNovelModal()">+ 新建</button>
+        <button class="header-btn" onclick="createNovelWithAI()">+ 新建</button>
     `);
     ui.showLoading(container);
 
