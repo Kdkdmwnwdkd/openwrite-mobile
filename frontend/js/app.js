@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.7.0',
+    VERSION: '2.7.1',
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 7
@@ -1209,12 +1209,12 @@ async function renderSettings(container) {
     container.innerHTML = `
         <div class="settings-group">
             <div class="settings-group-title">AI 提供商</div>
-            <div class="settings-item" onclick="showModelConfigModal()">
+                <div class="settings-item" onclick="showModelConfigModal()">
                 <div class="settings-item-left">
                     <div class="settings-icon">🤖</div>
                     <div>
                         <div class="settings-label">模型配置</div>
-                        <div class="settings-value">${config.provider || '未配置'} - ${config.model || ''}</div>
+                        <div class="settings-value" id="model-config-display">加载中…</div>
                     </div>
                 </div>
                 <span class="settings-arrow">›</span>
@@ -1241,70 +1241,40 @@ async function renderSettings(container) {
             </div>
         </div>
 
-        <div class="settings-group">
-            <div class="settings-group-title">创作工具</div>
-            <div class="settings-item" onclick="navigateTo('distill')">
-                <div class="settings-item-left">
-                    <div class="settings-icon">✨</div>
-                    <div>
-                        <div class="settings-label">蒸馏</div>
-                        <div class="settings-value">上传书籍，提取作者写作风格</div>
-                    </div>
+    <div class="settings-group">
+        <div class="settings-group-title">关于</div>
+        <div class="settings-item">
+            <div class="settings-item-left">
+                <div class="settings-icon">📦</div>
+                <div>
+                    <div class="settings-label">版本</div>
+                    <div class="settings-value">${CONFIG.VERSION}</div>
                 </div>
-                <span class="settings-arrow">›</span>
-            </div>
-            <div class="settings-item" onclick="navigateTo('distillTemplates')">
-                <div class="settings-item-left">
-                    <div class="settings-icon">🗂️</div>
-                    <div>
-                        <div class="settings-label">风格档案</div>
-                        <div class="settings-value">${tplCount} 个已蒸馏风格</div>
-                    </div>
-                </div>
-                <span class="settings-arrow">›</span>
-            </div>
-            <div class="settings-item" onclick="navigateTo('skillHistory')">
-                <div class="settings-item-left">
-                    <div class="settings-icon">📜</div>
-                    <div>
-                        <div class="settings-label">审查历史</div>
-                        <div class="settings-value">查看去AI味审查报告</div>
-                    </div>
-                </div>
-                <span class="settings-arrow">›</span>
-            </div>
-            <div class="settings-item" onclick="navigateTo('paramConfig')">
-                <div class="settings-item-left">
-                    <div class="settings-icon">🎛️</div>
-                    <div>
-                        <div class="settings-label">参数配置</div>
-                        <div class="settings-value">温度、上下文窗口与提示词</div>
-                    </div>
-                </div>
-                <span class="settings-arrow">›</span>
-            </div>
-            <div class="settings-item" onclick="navigateTo('dataManage')">
-                <div class="settings-item-left">
-                    <div class="settings-icon">💾</div>
-                    <div>
-                        <div class="settings-label">数据备份与恢复</div>
-                        <div class="settings-value">导出/导入全部数据</div>
-                    </div>
-                </div>
-                <span class="settings-arrow">›</span>
             </div>
         </div>
+    </div>
+</div>`;
 
-        <div class="settings-group">
-            <div class="settings-group-title">关于</div>
-            <div class="settings-item" onclick="navigateTo('about')">
-                <div class="settings-item-left">
-                    <div class="settings-icon">ℹ️</div>
-                    <div><div class="settings-label">关于 OpenWrite</div><div class="settings-value">版本 ${CONFIG.VERSION}</div></div>
-                </div>
-                <span class="settings-arrow">›</span>
-            </div>
-        </div>`;
+    // 更新模型配置显示
+    const displayEl = document.getElementById('model-config-display');
+    if (displayEl) {
+        const providerMap = {
+            'glm': '智谱',
+            'deepseek': 'DeepSeek',
+            'gpt': 'OpenAI',
+            'claude': 'Anthropic'
+        };
+        const detectProvider = (model) => {
+            if (!model) return 'custom';
+            for (const [prefix, name] of Object.entries(providerMap)) {
+                if (model.toLowerCase().startsWith(prefix)) return name;
+            }
+            return 'custom';
+        };
+        const friendlyProvider = detectProvider(config.model);
+        const hasKey = config.apiKey ? ' ✅已配置' : ' ❌未配置';
+        displayEl.textContent = `${friendlyProvider} · ${config.model || '未选'}${hasKey}`;
+    }
 }
 
 // ===== Param Config Page (v2.3.0) =====
@@ -1573,214 +1543,217 @@ function showCreateNovelModal() {
 }
 
 async function createNovelWithAI() {
-    const title = document.getElementById('new-novel-title').value.trim();
-    const desc = document.getElementById('new-novel-desc').value.trim();
-    const genre = document.getElementById('new-novel-genre').value;
-
-    if (!title) { ui.showToast('请输入作品名称'); return; }
-
     closeModal();
+    // 进入对话页并启动小说创建引导会话
+    navigateTo('chat');
+    // 延迟一点确保页面渲染完成
+    setTimeout(() => startNovelCreationGuide(), 300);
+}
+
+// ===== 对话式小说创建引导 (v2.7.1) =====
+let novelGuideState = null;
+
+function startNovelCreationGuide() {
+    novelGuideState = {
+        step: 0,
+        answers: {},
+        messagesBox: document.getElementById('chat-messages'),
+        inputBox: document.getElementById('chat-input')
+    };
     
-    // Show agent workflow UI
-    const workflowHtml = `
-        <div id="agent-workflow" style="padding: 16px;">
-            <div style="text-align: center; margin-bottom: 20px;">
-                <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">AI 正在创建小说</div>
-                <div style="font-size: 14px; color: var(--text-secondary);">《${escapeHtml(title)}》</div>
-            </div>
-            <div class="agent-steps" id="agent-steps"></div>
-            <div id="agent-result" style="margin-top: 16px;"></div>
-        </div>
-    `;
+    // 显示消息区域，隐藏 hero 和卡片
+    const hero = document.querySelector('.chat-hero');
+    const actionList = document.querySelector('.chat-action-list');
+    if (hero) hero.style.display = 'none';
+    if (actionList) actionList.style.display = 'none';
+    if (novelGuideState.messagesBox) novelGuideState.messagesBox.style.display = 'flex';
     
-    const container = document.getElementById('chat-view') || document.querySelector('.page-view.active');
-    if (container) {
-        container.innerHTML = workflowHtml;
+    // AI 第一条消息：问类型（自由输入）
+    addChatMessage('ai', '你好！我是你的 AI 写作助手 ✨\n\n你想写什么类型的小说？（如：玄幻、都市、科幻、悬疑等）');
+    setupGuideInputHandler('genre');
+}
+
+function addChatMessage(role, text, options = []) {
+    const box = document.getElementById('chat-messages');
+    if (!box) return;
+    
+    const msgDiv = document.createElement('div');
+    msgDiv.className = `msg-row ${role}`;
+    
+    let optionsHtml = '';
+    if (options.length > 0) {
+        optionsHtml = `<div class="msg-options">${options.map((opt, i) => 
+            `<button class="msg-option-btn" onclick="window._guideOption${Date.now()}_${i}()">${escapeHtml(opt.label)}</button>`
+        ).join('')}</div>`;
+        // 绑定全局函数
+        options.forEach((opt, i) => {
+            window[`_guideOption${Date.now()}_${i}`] = opt.action;
+        });
     }
+    
+    msgDiv.innerHTML = `
+        <div class="msg-bubble ${role}">
+            ${escapeHtml(text).replace(/\n/g, '<br>')}
+            ${optionsHtml}
+        </div>`;
+    box.appendChild(msgDiv);
+    box.scrollTop = box.scrollHeight;
+}
 
-    const stepsEl = document.getElementById('agent-steps');
-    const steps = [
-        { id: 'find-skills', label: '查找相关技能', icon: '🧩' },
-        { id: 'list-outline', label: '生成故事大纲', icon: '📋' },
-        { id: 'read-templates', label: '读取风格模板', icon: '📄' },
-        { id: 'generate-content', label: '生成章节内容', icon: '✍️' }
-    ];
+async function guideAnswer(key, value) {
+    if (!novelGuideState) return;
+    novelGuideState.answers[key] = value;
+    
+    // 显示用户回答
+    addChatMessage('user', value);
+    
+    // 清除选项按钮（通过重新渲染消息）
+    // 进入下一步
+    novelGuideState.step++;
+    await runGuideStep();
+}
 
-    function updateStep(index, status, detail) {
-        const html = steps.map((s, i) => {
-            const state = i < index ? 'completed' : i === index ? status : 'pending';
-            const icon = state === 'completed' ? '✅' : state === 'in-progress' ? '<span class="spinner" style="width:16px;height:16px;border-width:2px;"></span>' : '⏳';
-            const color = state === 'completed' ? 'var(--success)' : state === 'in-progress' ? 'var(--primary)' : 'var(--text-tertiary)';
-            return `
-                <div style="display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 10px; background: ${state === 'in-progress' ? 'rgba(99,102,241,0.05)' : 'var(--bg)'}; margin-bottom: 8px;">
-                    <div style="font-size: 20px;">${s.icon}</div>
-                    <div style="flex: 1;">
-                        <div style="font-size: 14px; font-weight: 500; color: ${color};">${s.label}</div>
-                        ${detail && i === index ? `<div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px;">${detail}</div>` : ''}
-                    </div>
-                    <div style="flex-shrink: 0;">${icon}</div>
-                </div>
-            `;
-        }).join('');
-        if (stepsEl) stepsEl.innerHTML = html;
+async function runGuideStep() {
+    const { step, answers } = novelGuideState;
+    
+    if (step === 1) {
+        // 已回答类型，问书名
+        addChatMessage('ai', `好的，${answers.genre}题材！你想给这本书起什么名字？`);
+        setupGuideInputHandler('title');
+    } else if (step === 2) {
+        // 已回答书名，直接生成大纲
+        addChatMessage('ai', `收到，书名是《${answers.title}》。让我为你构思故事大纲…`);
+        await generateNovelFromGuide();
     }
+}
 
-    try {
-        // Step 1: Find relevant skills
-        updateStep(0, 'in-progress', '搜索相关写作技能...');
-        await new Promise(r => setTimeout(r, 800));
-        const activeSkills = await skillManager.listActive();
-        const relevantSkills = activeSkills.filter(s => 
-            (genre && s.category?.includes(genre)) || 
-            s.content?.includes('大纲') || 
-            s.content?.includes('写作')
-        );
-        updateStep(0, 'completed', `找到 ${relevantSkills.length} 个相关技能`);
-
-        // Step 2: Generate outline
-        updateStep(1, 'in-progress', 'AI 正在构思故事大纲...');
-        await new Promise(r => setTimeout(r, 500));
+function setupGuideInputHandler(expectedKey) {
+    const input = document.getElementById('chat-input');
+    const sendBtn = document.getElementById('chat-send-btn');
+    if (!input || !sendBtn) return;
+    
+    // 临时替换发送按钮行为
+    const originalOnclick = sendBtn.onclick;
+    sendBtn.onclick = async () => {
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = '';
         
-        const outlinePrompt = `请为小说《${title}》生成一个完整的故事大纲。
-${desc ? '简介：' + desc : ''}
-${genre ? '类型：' + genre : ''}
+        novelGuideState.answers[expectedKey] = text;
+        addChatMessage('user', text);
+        novelGuideState.step++;
+        
+        // 恢复原始发送按钮
+        sendBtn.onclick = originalOnclick;
+        await runGuideStep();
+    };
+    
+    // 也支持回车发送
+    input.onkeydown = (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendBtn.click();
+        }
+    };
+}
 
-要求：
-1. 给出10-15章的章节标题和简要内容
-2. 包含主要人物设定
-3. 标注关键剧情转折点
+async function generateNovelFromGuide() {
+    const { answers } = novelGuideState;
+    const genre = answers.genre || '小说';
+    const title = answers.title || '未命名';
+    
+    try {
+        // 生成大纲（只基于类型和书名，AI自动补充角色和梗概）
+        const prompt = `请为一部${genre}小说生成完整大纲，书名是《${title}》：
+1. 10-15章的章节大纲
+2. 3-5个关键角色设定（含主角身份、性格）
+3. 世界观简述
+4. 故事梗概（100字左右）
 
-请以 JSON 格式输出：
+请严格输出JSON格式（不要markdown代码块）：
 {
-  "title": "作品名称",
   "outline": [
-    {"chapter": 1, "title": "第一章标题", "summary": "内容概要"}
+    {"chapter": 1, "title": "第一章标题", "summary": "本章概要"}
   ],
   "characters": [
-    {"name": "角色名", "role": "主角/配角", "description": "角色描述"}
-  ]
+    {"name": "角色名", "role": "主角", "description": "描述"}
+  ],
+  "worldbuilding": "世界观简述",
+  "synopsis": "故事梗概"
 }`;
-
-        let outlineContent = '';
+        
+        const result = await ai.chat([
+            { role: 'system', content: '你是专业小说编辑，擅长根据简单想法扩展为完整大纲。' },
+            { role: 'user', content: prompt }
+        ], null, 4000);
+        
+        // 解析 JSON
+        let plan = null;
         try {
-            outlineContent = await ai.chat([
-                { role: 'system', content: '你是专业的小说大纲规划师，擅长构建完整的故事架构。' },
-                { role: 'user', content: outlinePrompt }
-            ], null, 4000);
-        } catch (e) {
-            outlineContent = '';
+            const cleaned = result.replace(/\`\`\`json?\s*/g, '').replace(/\`\`\`\s*/g, '').trim();
+            plan = JSON.parse(cleaned);
+        } catch (_) {
+            const m = result.match(/\{[\s\S]*\}/);
+            if (m) { try { plan = JSON.parse(m[0]); } catch (_) {} }
         }
         
-        // Parse outline
-        let outline = null;
-        try {
-            const jsonMatch = outlineContent.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-                outline = JSON.parse(jsonMatch[0]);
-            }
-        } catch (e) {
-            outline = null;
+        if (!plan || !plan.outline) {
+            addChatMessage('ai', '抱歉，大纲生成遇到了问题。请手动创建小说吧。', [
+                { label: '手动创建', action: () => { showCreateNovelModal(); novelGuideState = null; } }
+            ]);
+            return;
         }
         
-        updateStep(1, 'completed', outline ? `大纲生成完成，共 ${outline.outline?.length || 0} 章` : '大纲生成完成');
-
-        // Step 3: Read templates
-        updateStep(2, 'in-progress', '查找风格模板...');
-        await new Promise(r => setTimeout(r, 600));
-        const templates = await distillManager.listTemplates();
-        const selectedTemplate = templates.length > 0 ? templates[0] : null;
-        updateStep(2, 'completed', selectedTemplate ? `已加载风格模板：${selectedTemplate.name}` : '使用默认风格');
-
-        // Step 4: Generate content
-        updateStep(3, 'in-progress', 'AI 正在生成第一章内容...');
-        await new Promise(r => setTimeout(r, 500));
+        // 展示大纲给用户确认（书名使用用户输入的）
+        const outlineText = (plan.outline || []).map(o => `第${o.chapter}章 ${o.title}`).join('\n');
+        const charsText = (plan.characters || []).map(c => `• ${c.name}（${c.role}）：${c.description}`).join('\n');
         
-        const novel = await novelManager.create(title, desc, genre);
+        addChatMessage('ai', `📖 大纲已生成！\n\n书名：《${title}》\n\n📋 章节规划：\n${outlineText}\n\n👥 主要角色：\n${charsText}\n\n确认创建这本小说吗？`, [
+            { label: '✅ 确认创建', action: () => guideConfirmCreate(plan, title) },
+            { label: '🔄 重新生成', action: () => { novelGuideState.step = 1; runGuideStep(); } },
+            { label: '❌ 取消', action: () => { novelGuideState = null; addChatMessage('ai', '已取消。你可以随时重新点击「新书启航」开始。'); } }
+        ]);
         
-        // Save outline as data
-        if (outline) {
-            novel.outline = outline.outline || [];
-            novel.characters = outline.characters || [];
-            await novelManager.update(novel);
+    } catch (e) {
+        addChatMessage('ai', '生成失败：' + e.message, [
+            { label: '手动创建', action: () => showCreateNovelModal() }
+        ]);
+    }
+}
+
+async function guideConfirmCreate(plan, title) {
+    try {
+        const novel = await novelManager.create(title || plan.title, plan.worldbuilding || '', '');
+        
+        // 保存大纲和角色
+        if (plan.outline) {
+            novel.outline = plan.outline;
         }
-
-        // Generate first chapter
-        const writePrompt = `请根据以下信息生成小说《${title}》第一章的完整内容。
-
-${desc ? '作品简介：' + desc : ''}
-${genre ? '类型：' + genre : ''}
-${outline && outline.outline ? '故事大纲：\n' + outline.outline.slice(0, 3).map(o => `第${o.chapter}章 ${o.title}：${o.summary}`).join('\n') : ''}
-${selectedTemplate ? '写作风格要求：\n' + selectedTemplate.content?.substring(0, 500) : ''}
-
-要求：
-1. 生成完整的第一章正文（2000-3000字）
-2. 包含章节标题
-3. 语言流畅，情节吸引人
-4. 符合${genre || '小说'}类型的风格特点
-
-请直接输出章节标题和正文内容。`;
-
-        let chapterContent = '';
-        let chapterTitle = '第一章';
-        
-        try {
-            const fullContent = await ai.chat([
-                { role: 'system', content: `你是专业的小说作家，擅长${genre || '各类'}小说创作。` },
-                { role: 'user', content: writePrompt }
-            ], null, 4000);
-            
-            // Extract title from content
-            const titleMatch = fullContent.match(/^(第[一二三四五六七八九十\d]+章[：:]|第[一二三四五六七八九十\d]+章\s+)(.+)$/m);
-            if (titleMatch) {
-                chapterTitle = titleMatch[2].trim() || '第一章';
-                chapterContent = fullContent.replace(titleMatch[0], '').trim();
-            } else {
-                chapterContent = fullContent;
-            }
-        } catch (e) {
-            chapterContent = 'AI 生成内容时出现错误，请重试或手动编写。';
+        if (plan.characters) {
+            novel.characters = plan.characters.map(c => ({
+                id: 'char_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+                name: c.name,
+                charName: c.name,
+                role: c.role,
+                description: c.description,
+                novelId: novel.id
+            }));
         }
-
-        // Save chapter
-        await novelManager.saveChapter(novel.id, 1, chapterTitle, chapterContent);
+        await novelManager.update(novel);
         
-        updateStep(3, 'completed', '第一章生成完成！');
-
-        // Show result
-        const resultEl = document.getElementById('agent-result');
-        if (resultEl) {
-            resultEl.innerHTML = `
-                <div style="background: var(--surface); border-radius: 12px; padding: 16px; margin-top: 16px;">
-                    <div style="font-size: 16px; font-weight: 600; margin-bottom: 8px;">✅ 小说创建成功</div>
-                    <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 12px;">
-                        《${escapeHtml(title)}》第一章已生成完毕
-                    </div>
-                    <div style="display: flex; gap: 8px;">
-                        <button class="btn btn-primary" style="flex: 1;" onclick="navigateTo('chapterEdit', { novelId: '${novel.id}', chapterNum: 1 })">查看章节</button>
-                        <button class="btn btn-secondary" style="flex: 1;" onclick="navigateTo('novelDetail', { novelId: '${novel.id}' })">查看作品</button>
-                    </div>
-                </div>
-            `;
-        }
-
-        ui.showToast('AI 已创建小说并生成第一章！');
-
-    } catch (err) {
-        console.error('AI 创建失败:', err);
-        ui.showToast('AI 创建失败: ' + err.message);
+        addChatMessage('ai', `✅ 小说《${title || plan.title}》已创建！\n\n接下来想做什么？`, [
+            { label: '✍️ 直接写第1章', action: () => { novelGuideState = null; navigateTo('chapterEdit', { novelId: novel.id, chapterNum: 1 }); } },
+            { label: '📋 查看作品详情', action: () => { novelGuideState = null; navigateTo('novelDetail', { novelId: novel.id }); } },
+            { label: '🗺️ 去多Agent协作', action: () => { novelGuideState = null; navigateTo('agentStudio', { novelId: novel.id }); } }
+        ]);
         
-        // Show error state
-        if (stepsEl) {
-            stepsEl.innerHTML += `
-                <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; padding: 12px; margin-top: 12px;">
-                    <div style="color: #b91c1c; font-size: 14px;">❌ 创建失败：${escapeHtml(err.message)}</div>
-                </div>
-            `;
-        }
+    } catch (e) {
+        addChatMessage('ai', '创建失败：' + e.message);
     }
 }
 
 async function createNovel() {
+    const title = document.getElementById('new-novel-title').value.trim();
     const desc = document.getElementById('new-novel-desc').value.trim();
     const genre = document.getElementById('new-novel-genre').value;
 
@@ -1902,28 +1875,36 @@ async function startWriting() {
     }
 }
 
-function showModelConfigModal() {
+async function showModelConfigModal() {
+    // 读取已保存的配置，预填充到弹窗
+    const saved = await settings.getModelConfig();
+    const isCustom = saved.model && !['glm-5.1','glm-4.5','glm-4','deepseek-chat','deepseek-reasoner','gpt-4o','gpt-4','gpt-3.5-turbo','claude-3.5-sonnet'].includes(saved.model);
+    const modelValue = isCustom ? 'custom' : (saved.model || 'deepseek-chat');
+    const customModelValue = isCustom ? (saved.model || '') : '';
+    const apiKeyValue = saved.apiKey || '';
+    const baseUrlValue = saved.baseUrl || '';
+
     const modal = createModal('模型配置', `
         <div style="display: flex; flex-direction: column; gap: 16px;">
             <div><label style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500;">API Key</label>
-            <input type="password" class="input" id="model-api-key" placeholder="输入你的 API Key..."></div>
+            <input type="password" class="input" id="model-api-key" placeholder="输入你的 API Key..." value="${escapeHtml(apiKeyValue)}"></div>
             <div><label style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500;">模型</label>
             <select class="input" id="model-name" onchange="toggleCustomModelRow()">
-                <option value="glm-5.1">GLM-5.1（智谱）</option>
-                <option value="glm-4.5">GLM-4.5（智谱）</option>
-                <option value="glm-4">GLM-4（智谱）</option>
-                <option value="deepseek-chat">DeepSeek Chat</option>
-                <option value="deepseek-reasoner">DeepSeek Reasoner</option>
-                <option value="gpt-4o">GPT-4o</option>
-                <option value="gpt-4">GPT-4</option>
-                <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-                <option value="claude-3.5-sonnet">Claude 3.5 Sonnet</option>
-                <option value="custom">自定义模型名</option>
+                <option value="glm-5.1" ${modelValue==='glm-5.1'?'selected':''}>GLM-5.1（智谱）</option>
+                <option value="glm-4.5" ${modelValue==='glm-4.5'?'selected':''}>GLM-4.5（智谱）</option>
+                <option value="glm-4" ${modelValue==='glm-4'?'selected':''}>GLM-4（智谱）</option>
+                <option value="deepseek-chat" ${modelValue==='deepseek-chat'?'selected':''}>DeepSeek Chat</option>
+                <option value="deepseek-reasoner" ${modelValue==='deepseek-reasoner'?'selected':''}>DeepSeek Reasoner</option>
+                <option value="gpt-4o" ${modelValue==='gpt-4o'?'selected':''}>GPT-4o</option>
+                <option value="gpt-4" ${modelValue==='gpt-4'?'selected':''}>GPT-4</option>
+                <option value="gpt-3.5-turbo" ${modelValue==='gpt-3.5-turbo'?'selected':''}>GPT-3.5 Turbo</option>
+                <option value="claude-3.5-sonnet" ${modelValue==='claude-3.5-sonnet'?'selected':''}>Claude 3.5 Sonnet</option>
+                <option value="custom" ${modelValue==='custom'?'selected':''}>自定义模型名</option>
             </select></div>
-            <div id="custom-model-row" style="display:none;"><label style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500;">模型名</label>
-            <input type="text" class="input" id="model-custom-name" placeholder="如：glm-5.1"></div>
+            <div id="custom-model-row" style="display:${isCustom?'block':'none'};"><label style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500;">模型名</label>
+            <input type="text" class="input" id="model-custom-name" placeholder="如：glm-5.1" value="${escapeHtml(customModelValue)}"></div>
             <div><label style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500;">Base URL（可选）</label>
-            <input type="text" class="input" id="model-base-url" placeholder="https://api.deepseek.com"></div>
+            <input type="text" class="input" id="model-base-url" placeholder="https://api.deepseek.com" value="${escapeHtml(baseUrlValue)}"></div>
             <button class="btn btn-primary btn-block" onclick="configureModel()">保存配置</button>
         </div>`);
     modal.show();
@@ -1949,14 +1930,36 @@ async function configureModel() {
     if (!apiKey) { ui.showToast('请输入 API Key'); return; }
 
     try {
+        const providerMap = {
+            'glm': '智谱',
+            'deepseek': 'DeepSeek',
+            'gpt': 'OpenAI',
+            'claude': 'Anthropic'
+        };
+        const detectProvider = (model) => {
+            if (!model) return 'custom';
+            for (const [prefix, name] of Object.entries(providerMap)) {
+                if (model.toLowerCase().startsWith(prefix)) return name;
+            }
+            return 'custom';
+        };
+        const friendlyProvider = detectProvider(model);
+        const hasKey = apiKey ? ' ✅已配置' : ' ❌未配置';
+        const displayText = `${friendlyProvider} · ${model || '未选'}${hasKey}`;
+        
         await settings.setModelConfig({
-            provider: 'custom',
+            provider: friendlyProvider,
             model,
             apiKey,
             baseUrl: baseUrl || undefined
         });
-        ui.showToast('模型配置成功！');
+        ui.showToast(`模型配置成功！${displayText}`);
         closeModal();
+        // 如果当前在设置页，刷新设置页显示
+        if (store.currentPage === 'settings') {
+            const container = document.getElementById('page-settings');
+            if (container) renderSettings(container);
+        }
     } catch (err) {
         ui.showToast('配置失败: ' + err.message);
     }

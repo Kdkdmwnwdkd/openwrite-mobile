@@ -4087,3 +4087,9 @@ html, body {
     text-indent: 2em;
     margin: 0.5em 0;
 }
+
+/* ===== 对话式创建输入框高亮 (v2.7.1) ===== */
+.guide-input-active {
+    border-color: var(--primary) !important;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2) !important;
+}
