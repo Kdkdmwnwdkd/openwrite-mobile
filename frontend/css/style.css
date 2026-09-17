@@ -2637,6 +2637,123 @@ html, body {
     flex-shrink: 0;
 }
 
+/* ===== Character Card ===== */
+.character-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+}
+.character-card {
+    background: var(--bg-card, #fff);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+}
+.character-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+.character-info {
+    flex: 1;
+    min-width: 0;
+}
+.character-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.character-tags {
+    display: flex;
+    gap: 4px;
+    margin-top: 3px;
+    flex-wrap: wrap;
+}
+.char-tag {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: var(--primary-soft, rgba(99,102,241,0.12));
+    color: var(--primary);
+}
+.character-meta {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.wb-cat-tab {
+    white-space: nowrap;
+    padding: 6px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--bg-card, #fff);
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.wb-cat-tab.active {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+}
+.wb-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+}
+.wb-item:last-child {
+    border-bottom: none;
+}
+.wb-item-icon {
+    font-size: 24px;
+    flex-shrink: 0;
+}
+.wb-item-body {
+    flex: 1;
+    min-width: 0;
+}
+.wb-item-title {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 2px;
+}
+.wb-item-cat {
+    font-size: 12px;
+    color: var(--primary);
+    margin-bottom: 2px;
+}
+.wb-item-content {
+    font-size: 13px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* ===== Responsive ===== */
 @media (max-width: 360px) {
     .chat-tool-row {

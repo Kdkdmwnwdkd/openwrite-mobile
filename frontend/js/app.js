@@ -6,10 +6,10 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.4.0',
+    VERSION: '2.5.0',
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
-    DB_VERSION: 4
+    DB_VERSION: 6
 };
 
 // ===== IndexedDB Store =====
@@ -52,6 +52,17 @@ const db = {
                 // v4: 备忘录系统
                 if (!db.objectStoreNames.contains('memos')) {
                     db.createObjectStore('memos', { keyPath: 'id' });
+                }
+                // v5: 角色卡系统
+                if (!db.objectStoreNames.contains('characters')) {
+                    const chars = db.createObjectStore('characters', { keyPath: 'id' });
+                    chars.createIndex('novelId', 'novelId', { unique: false });
+                }
+                // v6: 世界观设定库
+                if (!db.objectStoreNames.contains('worldbuilding')) {
+                    const wb = db.createObjectStore('worldbuilding', { keyPath: 'id' });
+                    wb.createIndex('novelId', 'novelId', { unique: false });
+                    wb.createIndex('category', 'category', { unique: false });
                 }
             };
         });
@@ -104,7 +115,7 @@ const db = {
     },
 
     // ===== 备份/恢复支持 =====
-    STORES: ['novels', 'chapters', 'settings', 'messages', 'skills', 'reviews', 'templates', 'skillStore', 'memos'],
+    STORES: ['novels', 'chapters', 'settings', 'messages', 'skills', 'reviews', 'templates', 'skillStore', 'memos', 'characters', 'worldbuilding'],
 
     async exportAll() {
         const database = await this.open();
@@ -272,11 +283,15 @@ const ai = {
     },
 
     async generateNovel(novelInfo) {
+        const charContext = await buildCharacterContext(novelInfo.id, 1);
+        const wbContext = await buildWorldbuildingContext(novelInfo.id);
         const prompt = `你是一个专业的小说写作助手。请根据以下信息生成一部小说的第一章：
 
 小说名称：${novelInfo.title}
 类型：${novelInfo.genre || '未指定'}
 简介：${novelInfo.description || '暂无'}
+${charContext ? '\n以下为已设定的角色卡（写作时必须严格遵照）：\n\n' + charContext + '\n' : ''}
+${wbContext ? '\n以下为世界观设定（写作时必须严格遵守规则）：\n\n' + wbContext + '\n' : ''}
 
 请生成：
 1. 第一章的标题
@@ -292,10 +307,14 @@ const ai = {
     },
 
     async continueChapter(novelInfo, previousChapters, chapterNum, prompt) {
+        const charContext = await buildCharacterContext(novelInfo.id, chapterNum);
+        const wbContext = await buildWorldbuildingContext(novelInfo.id);
         const context = previousChapters.map(ch => `第${ch.number}章：${ch.title}\n${ch.content.substring(0, 500)}...`).join('\n\n');
 
         const userPrompt = `请为小说《${novelInfo.title}》生成第${chapterNum}章。
 
+${charContext ? '以下为已设定的角色卡（写作时必须严格遵照角色性格、外貌、口头禅和当前状态）：\n\n' + charContext + '\n\n' : ''}
+${wbContext ? '以下为世界观设定（写作时必须严格遵守规则）：\n\n' + wbContext + '\n\n' : ''}
 前文章节概要：
 ${context}
 
@@ -309,19 +328,24 @@ ${context}
         ]);
     },
 
-    async reviewChapter(chapterContent, novelInfo) {
+    async reviewChapter(chapterContent, novelInfo, chapterNum) {
+        const charContext = chapterNum ? await buildCharacterContext(novelInfo.id, chapterNum) : '';
+        const wbContext = chapterNum ? await buildWorldbuildingContext(novelInfo.id) : '';
         const prompt = `请对以下小说章节进行专业审稿：
 
 小说：${novelInfo.title}
+${charContext ? '\n角色设定（用于校验角色是否OOC）：\n' + charContext + '\n' : ''}
+${wbContext ? '\n世界观设定（用于校验是否违反规则）：\n' + wbContext + '\n' : ''}
 章节内容：
 ${chapterContent}
 
 请从以下维度进行评价（每项满分10分）：
 1. 情节连贯性
-2. 人物塑造
+2. 人物塑造（是否与角色设定一致）
 3. 文笔流畅度
 4. 场景描写
 5. 对话质量
+${wbContext ? '6. 设定一致性（是否违反世界观规则）' : ''}
 
 给出具体分数和修改建议。`;
 
@@ -488,6 +512,117 @@ const novelManager = {
         novel.plotBranches = branches;
         novel.updated = Date.now();
         await db.put('novels', novel);
+    },
+
+    // ===== Character Card Manager (v2.4.0) =====
+    async listCharacters(novelId) {
+        return await db.getAll('characters', 'novelId', novelId);
+    },
+
+    async getCharacter(charId) {
+        return await db.get('characters', charId);
+    },
+
+    async createCharacter(novelId, data) {
+        const id = `char_${novelId}_${Date.now()}`;
+        const char = {
+            id,
+            novelId,
+            name: data.name || '',
+            avatar: data.avatar || '',
+            tags: data.tags || [],
+            age: data.age || '',
+            appearance: data.appearance || '',
+            personality: data.personality || '',
+            backstory: data.backstory || '',
+            catchphrase: data.catchphrase || '',
+            currentStatus: data.currentStatus || '',
+            relationships: data.relationships || [],
+            arc: data.arc || '',
+            created: Date.now(),
+            updated: Date.now()
+        };
+        await db.put('characters', char);
+        return char;
+    },
+
+    async updateCharacter(charId, data) {
+        const char = await this.getCharacter(charId);
+        if (!char) throw new Error('角色不存在');
+        Object.assign(char, data, { updated: Date.now() });
+        await db.put('characters', char);
+        return char;
+    },
+
+    async deleteCharacter(charId) {
+        await db.delete('characters', charId);
+    },
+
+    async getChapterCharacters(novelId, chapterNum) {
+        const chapter = await this.getChapter(novelId, chapterNum);
+        return chapter && chapter.characters ? chapter.characters : [];
+    },
+
+    async setChapterCharacters(novelId, chapterNum, charIds) {
+        const chapter = await this.getChapter(novelId, chapterNum);
+        if (chapter) {
+            chapter.characters = charIds;
+            chapter.updated = Date.now();
+            await db.put('chapters', chapter);
+        }
+    },
+
+    async autoLinkCharacters(novelId, chapterNum) {
+        const chapter = await this.getChapter(novelId, chapterNum);
+        if (!chapter) return [];
+        const chars = await this.listCharacters(novelId);
+        const linked = [];
+        for (const char of chars) {
+            if (char.name && chapter.content && chapter.content.includes(char.name)) {
+                linked.push(char.id);
+            }
+        }
+        if (linked.length > 0) {
+            await this.setChapterCharacters(novelId, chapterNum, linked);
+        }
+        return linked;
+    },
+
+    // ===== Worldbuilding Manager (v2.5.0) =====
+    async listWorldbuilding(novelId, category = null) {
+        const items = await db.getAll('worldbuilding', 'novelId', novelId);
+        return category ? items.filter(i => i.category === category) : items;
+    },
+
+    async getWorldbuilding(id) {
+        return await db.get('worldbuilding', id);
+    },
+
+    async createWorldbuilding(novelId, data) {
+        const id = `wb_${novelId}_${Date.now()}`;
+        const item = {
+            id, novelId,
+            category: data.category || 'other',
+            title: data.title || '',
+            content: data.content || '',
+            rules: data.rules || '',
+            created: Date.now(),
+            updated: Date.now()
+        };
+        await db.put('worldbuilding', item);
+        return item;
+    },
+
+    async updateWorldbuilding(id, data) {
+        const item = await this.getWorldbuilding(id);
+        if (!item) throw new Error('设定不存在');
+        Object.assign(item, data, { updated: Date.now() });
+        await db.put('worldbuilding', item);
+        return item;
+    },
+
+    async deleteWorldbuilding(id) {
+        await db.delete('worldbuilding', id);
     }
 };
 
@@ -577,7 +712,13 @@ function navigateTo(page, params = {}) {
         // 情节推演
         plotSimulate: () => renderPlotSimulate(params.novelId),
         // 节拍控制
-        beatControl: () => renderBeatControl(params.novelId, params.chapterNum)
+        beatControl: () => renderBeatControl(params.novelId, params.chapterNum),
+        // 角色卡
+        characterCards: () => renderCharacterCards(params.novelId),
+        characterEdit: () => renderCharacterEdit(params.novelId, params.characterId),
+        // 世界观
+        worldview: () => renderWorldView(params.novelId),
+        worldviewEdit: () => renderWorldviewEdit(params.novelId, params.worldviewId)
     };
 
     if (renderers[page]) renderers[page](view);
@@ -905,6 +1046,10 @@ async function renderNovelDetail(container, novelId) {
             <div class="action-buttons-row" style="margin-bottom: 12px;">
                 <button class="btn btn-outline" onclick="navigateTo('outlineEditor', { novelId: '${novelId}' })">📋 编辑大纲</button>
                 <button class="btn btn-outline" onclick="navigateTo('plotSimulate', { novelId: '${novelId}' })">🔮 情节推演</button>
+                <button class="btn btn-outline" onclick="navigateTo('characterCards', { novelId: '${novelId}' })">👥 角色卡</button>
+            </div>
+            <div class="action-buttons-row" style="margin-bottom: 12px;">
+                <button class="btn btn-outline" onclick="navigateTo('worldview', { novelId: '${novelId}' })">🌍 世界观</button>
             </div>
 
             <!-- 目录树形结构 -->
@@ -3266,4 +3411,372 @@ ${chapter ? '本章内容节选：\n' + content : ''}
     } catch (e) {
         resultBox.innerHTML = `<div style="color:var(--error);">分析失败: ${escapeHtml(e.message)}</div>`;
     }
+}
+
+// ===== Character Card System (v2.4.0) =====
+async function renderCharacterCards(container, novelId) {
+    const novel = await novelManager.get(novelId);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    ui.setPageTitle(`👥 ${novel.title} · 角色卡`);
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
+        <button class="header-btn" onclick="navigateTo('characterEdit', { novelId: '${novelId}' })">+ 新建</button>
+    `);
+
+    const chars = await novelManager.listCharacters(novelId);
+    if (chars.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">👤</div>
+                <div class="empty-title">暂无角色</div>
+                <div class="empty-desc">点击右上角 + 新建创建第一个角色卡</div>
+            </div>`;
+        return;
+    }
+    container.innerHTML = `
+        <div style="padding: 12px 16px;">
+            <div style="display:flex;gap:8px;margin-bottom:12px;overflow-x:auto;">
+                <button class="btn btn-outline" style="white-space:nowrap;" onclick="viewCharacterGraph('${novelId}')">🔍 关系图谱</button>
+                <button class="btn btn-outline" style="white-space:nowrap;" onclick="autoLinkAllChars('${novelId}')">🔗 自动关联章节</button>
+            </div>
+            <div class="character-grid">
+                ${chars.map(char => `
+                    <div class="character-card" onclick="navigateTo('characterEdit', { novelId: '${novelId}', characterId: '${char.id}' })">
+                        <div class="character-avatar">${(char.name || '?').charAt(0)}</div>
+                        <div class="character-info">
+                            <div class="character-name">${escapeHtml(char.name || '未命名')}</div>
+                            <div class="character-tags">${(char.tags || []).map(t => `<span class="char-tag">${escapeHtml(t)}</span>`).join('')}</div>
+                            <div class="character-meta">${escapeHtml(char.personality || '')}</div>
+                        </div>
+                        <span class="settings-arrow">›</span>
+                    </div>
+                `).join('')}
+            </div>
+        </div>`;
+}
+
+async function renderCharacterEdit(container, novelId, characterId) {
+    const novel = await novelManager.get(novelId);
+    const char = characterId ? await novelManager.getCharacter(characterId) : null;
+    const isNew = !char;
+    ui.setPageTitle(isNew ? '新建角色' : `编辑 · ${char.name}`);
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('characterCards', { novelId: '${novelId}' })">返回</button>
+        ${!isNew ? `<button class="header-btn" onclick="deleteCharacterCard('${characterId}', '${novelId}')">删除</button>` : ''}
+        <button class="header-btn" onclick="saveCharacter('${novelId}', '${characterId || ''}')">保存</button>
+    `);
+    container.innerHTML = `
+        <div style="padding: 12px 16px; display:flex; flex-direction:column; gap: 12px;">
+            <div><label class="form-label">姓名 *</label>
+            <input type="text" class="form-input" id="char-name" value="${escapeHtml(char?.name || '')}" placeholder="角色姓名"></div>
+            <div style="display:flex; gap: 12px;">
+                <div style="flex:1;"><label class="form-label">年龄</label>
+                <input type="text" class="form-input" id="char-age" value="${escapeHtml(char?.age || '')}" placeholder="如：24岁"></div>
+                <div style="flex:1;"><label class="form-label">标签</label>
+                <input type="text" class="form-input" id="char-tags" value="${escapeHtml((char?.tags || []).join('、'))}" placeholder="主角, 剑客, 孤儿"></div>
+            </div>
+            <div><label class="form-label">外貌</label>
+            <textarea class="form-textarea" id="char-appearance" rows="2" placeholder="外貌特征描述…">${escapeHtml(char?.appearance || '')}</textarea></div>
+            <div><label class="form-label">性格</label>
+            <textarea class="form-textarea" id="char-personality" rows="2" placeholder="性格特点…">${escapeHtml(char?.personality || '')}</textarea></div>
+            <div><label class="form-label">前史 / 背景</label>
+            <textarea class="form-textarea" id="char-backstory" rows="3" placeholder="角色的过去、成长经历…">${escapeHtml(char?.backstory || '')}</textarea></div>
+            <div><label class="form-label">口头禅</label>
+            <input type="text" class="form-input" id="char-catchphrase" value="${escapeHtml(char?.catchphrase || '')}" placeholder="如：我命由我不由天！"></div>
+            <div><label class="form-label">当前状态</label>
+            <input type="text" class="form-input" id="char-status" value="${escapeHtml(char?.currentStatus || '')}" placeholder="如：重伤隐居、修为金丹期"></div>
+            <div><label class="form-label">人物弧光</label>
+            <textarea class="form-textarea" id="char-arc" rows="2" placeholder="角色在故事中的成长/变化…">${escapeHtml(char?.arc || '')}</textarea></div>
+            <div><label class="form-label">关系网（每行一个：关系人,关系类型）</label>
+            <textarea class="form-textarea" id="char-relations" rows="3" placeholder="师父,师徒&#10;师妹,青梅竹马">${escapeHtml((char?.relationships || []).map(r => `${r.target},${r.type}`).join('\n'))}</textarea></div>
+        </div>`;
+}
+
+async function saveCharacter(novelId, characterId) {
+    const name = document.getElementById('char-name').value.trim();
+    if (!name) { ui.showToast('请输入角色姓名'); return; }
+    const tags = document.getElementById('char-tags').value.split(/[,，、]/).map(t => t.trim()).filter(t => t);
+    const relationsRaw = document.getElementById('char-relations').value.split('\n').map(l => l.trim()).filter(l => l);
+    const relationships = relationsRaw.map(line => {
+        const parts = line.split(/[,，]/);
+        return { target: parts[0]?.trim() || '', type: parts[1]?.trim() || '关联' };
+    }).filter(r => r.target);
+    const data = {
+        name, age: document.getElementById('char-age').value.trim(), tags,
+        appearance: document.getElementById('char-appearance').value.trim(),
+        personality: document.getElementById('char-personality').value.trim(),
+        backstory: document.getElementById('char-backstory').value.trim(),
+        catchphrase: document.getElementById('char-catchphrase').value.trim(),
+        currentStatus: document.getElementById('char-status').value.trim(),
+        arc: document.getElementById('char-arc').value.trim(), relationships
+    };
+    try {
+        if (characterId) {
+            await novelManager.updateCharacter(characterId, data);
+            ui.showToast('角色已更新');
+        } else {
+            await novelManager.createCharacter(novelId, data);
+            ui.showToast('角色已创建');
+        }
+        navigateTo('characterCards', { novelId });
+    } catch (e) {
+        ui.showToast('保存失败: ' + e.message);
+    }
+}
+
+async function deleteCharacterCard(characterId, novelId) {
+    if (!confirm('确定要删除这个角色卡吗？')) return;
+    try {
+        await novelManager.deleteCharacter(characterId);
+        ui.showToast('已删除');
+        navigateTo('characterCards', { novelId });
+    } catch (e) {
+        ui.showToast('删除失败: ' + e.message);
+    }
+}
+
+// ===== Character Graph =====
+async function viewCharacterGraph(novelId) {
+    const chars = await novelManager.listCharacters(novelId);
+    if (chars.length === 0) { ui.showToast('没有角色可展示'); return; }
+    const nodes = chars.map((c, i) => ({ id: c.id, name: c.name, index: i, color: ['#6366f1','#ec4899','#f59e0b','#10b981','#3b82f6','#8b5cf6','#ef4444','#14b8a6'][i % 8] }));
+    const edges = [];
+    chars.forEach((c, i) => {
+        (c.relationships || []).forEach(r => {
+            const targetIdx = chars.findIndex(cc => cc.name === r.target || cc.id === r.target);
+            if (targetIdx >= 0 && targetIdx !== i) edges.push({ source: i, target: targetIdx, label: r.type });
+        });
+    });
+    const width = Math.min(window.innerWidth - 32, 600);
+    const height = Math.max(300, Math.min(500, window.innerHeight * 0.5));
+    const cx = width / 2, cy = height / 2, radius = Math.min(width, height) * 0.35;
+    const pos = nodes.map((n, i) => {
+        const angle = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
+        return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
+    });
+    const svgEdges = edges.map(e => {
+        const s = pos[e.source], t = pos[e.target];
+        const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
+        return `<line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="#ccc" stroke-width="1.5" /><text x="${mx}" y="${my}" font-size="11" fill="#999" text-anchor="middle" dy="-3">${escapeHtml(e.label)}</text>`;
+    }).join('');
+    const svgNodes = nodes.map((n, i) => {
+        const p = pos[i];
+        return `<g transform="translate(${p.x},${p.y})"><circle r="28" fill="${n.color}" opacity="0.15" /><circle r="24" fill="${n.color}" /><text y="5" font-size="14" fill="#fff" text-anchor="middle" font-weight="600">${escapeHtml(n.name.charAt(0))}</text><text y="38" font-size="12" fill="var(--text)" text-anchor="middle">${escapeHtml(n.name)}</text></g>`;
+    }).join('');
+    const modal = createModal('角色关系图谱', `
+        <div style="overflow-x:auto;"><svg width="${width}" height="${height}" style="background:var(--bg);border-radius:12px;">${svgEdges}${svgNodes}</svg></div>
+        <div style="font-size:12px;color:var(--text-tertiary);margin-top:8px;text-align:center;">共 ${chars.length} 个角色 · ${edges.length} 组关系</div>`);
+    modal.show();
+}
+
+async function autoLinkAllChars(novelId) {
+    const chapters = await novelManager.listChapters(novelId);
+    if (chapters.length === 0) { ui.showToast('暂无章节'); return; }
+    ui.showToast('正在自动关联角色…');
+    let total = 0;
+    for (const ch of chapters) {
+        const linked = await novelManager.autoLinkCharacters(novelId, ch.number);
+        total += linked.length;
+    }
+    ui.showToast(`完成：共关联 ${total} 次角色引用`);
+}
+
+// ===== AI Character Context Builder =====
+async function buildCharacterContext(novelId, chapterNum) {
+    const chars = await novelManager.listCharacters(novelId);
+    if (chars.length === 0) return '';
+    const linkedIds = await novelManager.getChapterCharacters(novelId, chapterNum);
+    let relevantChars = chars;
+    if (linkedIds && linkedIds.length > 0) {
+        relevantChars = chars.filter(c => linkedIds.includes(c.id));
+    }
+    if (relevantChars.length === 0) relevantChars = chars.slice(0, 5);
+    return relevantChars.map(c => {
+        const parts = [`【${c.name}】`];
+        if (c.appearance) parts.push(`外貌：${c.appearance}`);
+        if (c.personality) parts.push(`性格：${c.personality}`);
+        if (c.backstory) parts.push(`背景：${c.backstory}`);
+        if (c.catchphrase) parts.push(`口头禅：${c.catchphrase}`);
+        if (c.currentStatus) parts.push(`当前状态：${c.currentStatus}`);
+        if (c.arc) parts.push(`人物弧光：${c.arc}`);
+        return parts.join('\n');
+    }).join('\n\n');
+}
+
+// ===== World View Page (v2.5.0) =====
+const WB_CATEGORIES = [
+    { key: 'map', icon: '🗺️', label: '地图与地理' },
+    { key: 'faction', icon: '⚔️', label: '势力与组织' },
+    { key: 'timeline', icon: '⏳', label: '时间线与历史' },
+    { key: 'rule', icon: '📜', label: '规则与法则' },
+    { key: 'other', icon: '📦', label: '其他设定' }
+];
+
+async function renderWorldView(container, novelId) {
+    const novel = await novelManager.get(novelId);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    ui.setPageTitle(`🌍 ${novel.title} · 世界观`);
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
+        <button class="header-btn" onclick="navigateTo('worldviewEdit', { novelId: '${novelId}' })">+ 新建</button>
+    `);
+
+    const items = await novelManager.listWorldbuilding(novelId);
+    const cats = WB_CATEGORIES;
+
+    container.innerHTML = `
+        <div style="padding: 12px 16px;">
+            <div class="wb-cat-tabs" style="display:flex;gap:8px;margin-bottom:16px;overflow-x:auto;">
+                <button class="wb-cat-tab active" onclick="filterWorldview('all', '${novelId}')">全部</button>
+                ${cats.map(c => `<button class="wb-cat-tab" onclick="filterWorldview('${c.key}', '${novelId}')">${c.icon} ${c.label}</button>`).join('')}
+            </div>
+            <div id="wb-list"></div>
+        </div>
+    `;
+    renderWorldviewList(items, novelId);
+}
+
+function renderWorldviewList(items, novelId) {
+    const list = document.getElementById('wb-list');
+    if (!list) return;
+    if (items.length === 0) {
+        list.innerHTML = `<div class="empty-state"><div class="empty-icon">🌍</div><div class="empty-title">暂无世界观设定</div><div class="empty-desc">点击右上角 + 新建添加地图、势力、规则等设定</div></div>`;
+        return;
+    }
+    list.innerHTML = items.map(item => {
+        const cat = WB_CATEGORIES.find(c => c.key === item.category) || WB_CATEGORIES[4];
+        return `
+            <div class="wb-item" onclick="navigateTo('worldviewEdit', { novelId: '${novelId}', worldviewId: '${item.id}' })">
+                <div class="wb-item-icon">${cat.icon}</div>
+                <div class="wb-item-body">
+                    <div class="wb-item-title">${escapeHtml(item.title)}</div>
+                    <div class="wb-item-cat">${cat.label}</div>
+                    <div class="wb-item-content">${escapeHtml(item.content.substring(0, 120))}${item.content.length > 120 ? '…' : ''}</div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>`;
+    }).join('');
+}
+
+let currentWbFilter = 'all';
+async function filterWorldview(category, novelId) {
+    currentWbFilter = category;
+    document.querySelectorAll('.wb-cat-tab').forEach(tab => tab.classList.toggle('active', tab.textContent.includes(category === 'all' ? '全部' : '') || tab.getAttribute('onclick')?.includes(`'${category}'`)));
+    const items = category === 'all' ? await novelManager.listWorldbuilding(novelId) : await novelManager.listWorldbuilding(novelId, category);
+    renderWorldviewList(items, novelId);
+}
+
+async function renderWorldviewEdit(container, novelId, worldviewId) {
+    const item = worldviewId ? await novelManager.getWorldbuilding(worldviewId) : null;
+    const isNew = !item;
+    ui.setPageTitle(isNew ? '新建设定' : `编辑 · ${item.title}`);
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('worldview', { novelId: '${novelId}' })">返回</button>
+        ${!isNew ? `<button class="header-btn" onclick="deleteWorldview('${worldviewId}', '${novelId}')">删除</button>` : ''}
+        <button class="header-btn" onclick="saveWorldview('${novelId}', '${worldviewId || ''}')">保存</button>
+    `);
+
+    container.innerHTML = `
+        <div style="padding: 12px 16px; display:flex; flex-direction:column; gap: 12px;">
+            <div><label class="form-label">分类</label>
+            <select class="form-select" id="wb-cat">
+                ${WB_CATEGORIES.map(c => `<option value="${c.key}" ${item?.category===c.key?'selected':''}>${c.icon} ${c.label}</option>`).join('')}
+            </select></div>
+            <div><label class="form-label">标题 *</label>
+            <input type="text" class="form-input" id="wb-title" value="${escapeHtml(item?.title || '')}" placeholder="如：青云大陆地图"></div>
+            <div><label class="form-label">内容</label>
+            <textarea class="form-textarea" id="wb-content" rows="6" placeholder="详细描述该设定…">${escapeHtml(item?.content || '')}</textarea></div>
+            <div><label class="form-label">约束规则（AI 写作时必须遵守）</label>
+            <textarea class="form-textarea" id="wb-rules" rows="4" placeholder="如：灵气浓度随海拔升高而降低；凡人不可直视仙人真容，否则爆体而亡…">${escapeHtml(item?.rules || '')}</textarea></div>
+        </div>`;
+}
+
+async function saveWorldview(novelId, id) {
+    const cat = document.getElementById('wb-cat').value;
+    const title = document.getElementById('wb-title').value.trim();
+    if (!title) { ui.showToast('请输入标题'); return; }
+    const data = {
+        category: cat,
+        title,
+        content: document.getElementById('wb-content').value.trim(),
+        rules: document.getElementById('wb-rules').value.trim()
+    };
+    try {
+        if (id) {
+            await novelManager.updateWorldbuilding(id, data);
+            ui.showToast('设定已更新');
+        } else {
+            await novelManager.createWorldbuilding(novelId, data);
+            ui.showToast('设定已创建');
+        }
+        navigateTo('worldview', { novelId });
+    } catch (e) {
+        ui.showToast('保存失败: ' + e.message);
+    }
+}
+
+async function deleteWorldview(id, novelId) {
+    if (!confirm('确定删除此设定吗？')) return;
+    try {
+        await novelManager.deleteWorldbuilding(id);
+        ui.showToast('已删除');
+        navigateTo('worldview', { novelId });
+    } catch (e) {
+        ui.showToast('删除失败: ' + e.message);
+    }
+}
+
+// ===== AI Worldbuilding Context Injection =====
+async function buildWorldbuildingContext(novelId) {
+    const items = await novelManager.listWorldbuilding(novelId);
+    if (items.length === 0) return '';
+    const parts = ['【世界观设定】'];
+    WB_CATEGORIES.forEach(cat => {
+        const catItems = items.filter(i => i.category === cat.key);
+        if (catItems.length > 0) {
+            parts.push(`\n${cat.icon} ${cat.label}：`);
+            catItems.forEach(item => {
+                parts.push(`  · ${item.title}：${item.content.substring(0, 200)}${item.content.length > 200 ? '…' : ''}`);
+                if (item.rules) parts.push(`    [规则] ${item.rules}`);
+            });
+        }
+    });
+    return parts.join('\n');
+}
+
+// ===== AI Worldbuilding Conflict Check =====
+async function checkWorldbuildingConflict(novelId, text) {
+    const items = await novelManager.listWorldbuilding(novelId);
+    if (items.length === 0) return [];
+    const conflicts = [];
+    for (const item of items) {
+        if (!item.rules) continue;
+        const keywords = extractKeywords(item.rules);
+        const found = keywords.filter(kw => text.includes(kw));
+        if (found.length > 0) {
+            try {
+                const prompt = `请判断以下文本是否违反了设定规则。
+
+设定：${item.title}
+规则：${item.rules}
+
+文本片段：
+${text.substring(0, 800)}
+
+只需回答：是（违反）/ 否（未违反）。如果是，简要说明违反了哪条规则。`;
+                const result = await ai.chat([
+                    { role: 'system', content: '你是严格的设定审查官，只回答"是"或"否"。' },
+                    { role: 'user', content: prompt }
+                ], null, 500);
+                if (result.includes('是') || result.includes('违反')) {
+                    conflicts.push({ item, reason: result.replace(/^是[：:]?\s*/, '').substring(0, 100) || '可能违反设定规则' });
+                }
+            } catch (e) {
+                if (found.length >= 2) {
+                    conflicts.push({ item, reason: `包含规则关键词：${found.join('、')}` });
+                }
+            }
+        }
+    }
+    return conflicts;
 }
