@@ -427,106 +427,77 @@ function navigateTo(page, params = {}) {
 // ===== Chat / Home Page =====
 function renderChat(container) {
     ui.setPageTitle('新对话');
-    ui.setHeaderActions(`
-        <button class="header-btn" onclick="navigateTo('skillPlaza')">🏪 Skill广场</button>
-        <button class="header-btn" onclick="showModelIndicator()">${store.modelName || 'glm-5.1'}</button>
-    `);
+    // 竞品风格：无顶部操作按钮，模型名在标题下方显示
+    ui.setHeaderActions('');
 
     container.innerHTML = `
-        <div style="padding: 16px; display: flex; flex-direction: column; min-height: calc(100vh - 140px);">
-            <!-- 功能工作台：蒸馏 / 技能审查 置顶（用户核心功能） -->
-            <div class="workbench">
-                <div class="workbench-title">创作者工作台</div>
-                <div class="workbench-grid">
-                    <div class="workbench-item primary" onclick="navigateTo('distill')">
-                        <div class="workbench-icon">✨</div>
-                        <div class="workbench-name">蒸馏</div>
-                        <div class="workbench-desc">学风格写</div>
+        <div style="padding: 0 16px; display: flex; flex-direction: column; height: calc(100vh - 120px); overflow-y: auto;">
+            <!-- 顶部模型指示器 -->
+            <div style="font-size: 13px; color: var(--text-tertiary); margin: 4px 0 12px;">${store.modelName || 'glm-5.1'}</div>
+
+            <!-- 快捷工具胶囊行 -->
+            <div class="chat-tool-row">
+                <button class="chat-tool-pill" onclick="showMemo()"><span class="tool-pill-icon">📝</span>备忘录</button>
+                <button class="chat-tool-pill" onclick="showNameGenerator()"><span class="tool-pill-icon">T</span>起名</button>
+                <button class="chat-tool-pill primary" onclick="navigateTo('distill')"><span class="tool-pill-icon">✨</span>蒸馏</button>
+                <button class="chat-tool-pill" onclick="showDeconstruct()"><span class="tool-pill-icon">📖</span>拆解</button>
+                <button class="chat-tool-pill" onclick="showRank()"><span class="tool-pill-icon">📊</span>扫榜</button>
+            </div>
+
+            <!-- 中央 Logo 区域 -->
+            <div class="chat-hero">
+                <div class="chat-hero-logo">✨</div>
+                <div class="chat-hero-title">OpenWrite</div>
+                <div class="chat-hero-subtitle">你的 AI 小说写作助手</div>
+            </div>
+
+            <!-- 操作卡片 -->
+            <div class="chat-action-list">
+                <div class="chat-action-card" onclick="showCreateNovelModal()">
+                    <div class="chat-action-icon" style="background: linear-gradient(135deg, #ede9fe, #ddd6fe);">📚</div>
+                    <div class="chat-action-body">
+                        <div class="chat-action-title">新书启航</div>
+                        <div class="chat-action-desc">初始化小说项目，创建目录结构</div>
                     </div>
-                    <div class="workbench-item primary" onclick="navigateTo('skillCenter')">
-                        <div class="workbench-icon">🧪</div>
-                        <div class="workbench-name">去AI味</div>
-                        <div class="workbench-desc">审查润色</div>
+                    <span class="chat-action-arrow">›</span>
+                </div>
+                <div class="chat-action-card" onclick="continueWriting()">
+                    <div class="chat-action-icon" style="background: linear-gradient(135deg, #fef3c7, #fde68a);">✍️</div>
+                    <div class="chat-action-body">
+                        <div class="chat-action-title">继续写作</div>
+                        <div class="chat-action-desc">继续上一次的对话</div>
                     </div>
-                    <div class="workbench-item" onclick="showNameGenerator()">
-                        <div class="workbench-icon">📛</div>
-                        <div class="workbench-name">起名</div>
-                        <div class="workbench-desc">角色灵感</div>
+                    <span class="chat-action-arrow">›</span>
+                </div>
+                <div class="chat-action-card" onclick="showTutorial()">
+                    <div class="chat-action-icon" style="background: linear-gradient(135deg, #fce7f3, #fbcfe8);">📖</div>
+                    <div class="chat-action-body">
+                        <div class="chat-action-title">使用教程</div>
+                        <div class="chat-action-desc">查看使用手册</div>
                     </div>
-                    <div class="workbench-item" onclick="showDeconstruct()">
-                        <div class="workbench-icon">🔎</div>
-                        <div class="workbench-name">拆解</div>
-                        <div class="workbench-desc">结构分析</div>
-                    </div>
-                    <div class="workbench-item" onclick="showRank()">
-                        <div class="workbench-icon">📊</div>
-                        <div class="workbench-name">扫榜</div>
-                        <div class="workbench-desc">市场风向</div>
-                    </div>
-                    <div class="workbench-item" onclick="showMemory()">
-                        <div class="workbench-icon">🧠</div>
-                        <div class="workbench-name">记忆</div>
-                        <div class="workbench-desc">写作设定</div>
-                    </div>
+                    <span class="chat-action-arrow">›</span>
                 </div>
             </div>
 
-            <!-- 快捷操作（旧快捷按钮替代：小说/对话直达） -->
-            <div style="display: flex; gap: 8px; overflow-x: auto; margin-bottom: 20px; padding-bottom: 4px;">
-                <div class="quick-action" onclick="navigateTo('bookshelf')">
-                    <span class="quick-icon">📖</span>
-                    <span>我的小说</span>
-                </div>
-                <div class="quick-action" onclick="continueWriting()">
-                    <span class="quick-icon">✍️</span>
-                    <span>继续写作</span>
-                </div>
-                <div class="quick-action" onclick="navigateTo('skillHistory')">
-                    <span class="quick-icon">📜</span>
-                    <span>审查历史</span>
-                </div>
-            </div>
-
-            <!-- Main Actions -->
-            <div class="main-actions">
-                <div class="action-card" onclick="showCreateNovelModal()">
-                    <div class="action-icon">📚</div>
-                    <div class="action-content">
-                        <div class="action-title">新书启航</div>
-                        <div class="action-desc">初始化小说项目，创建目录结构</div>
-                    </div>
-                    <span class="action-arrow">›</span>
-                </div>
-
-                <div class="action-card" onclick="showTutorial()">
-                    <div class="action-icon">📖</div>
-                    <div class="action-content">
-                        <div class="action-title">使用教程</div>
-                        <div class="action-desc">快速上手：蒸馏、审查、写作</div>
-                    </div>
-                    <span class="action-arrow">›</span>
-                </div>
-            </div>
-
-            <!-- 对话记录 -->
-            <div id="chat-messages" class="chat-messages">
-                <div class="chat-welcome">
-                    <div class="chat-welcome-icon">✒️</div>
-                    <div class="chat-welcome-text">你好，我是你的 AI 写作搭子。<br>可以直接告诉我你的写作想法，也可以先用「蒸馏」学一本好书的风格。</div>
-                </div>
-            </div>
+            <!-- 消息区域（默认隐藏，发送消息后显示） -->
+            <div id="chat-messages" style="display:none; flex-direction: column; gap: 12px; margin-top: auto; padding-bottom: 16px;"></div>
         </div>
 
-        <!-- Chat Input Area -->
-        <div class="chat-input-area">
-            <div class="chat-input-wrapper">
-                <textarea class="chat-textarea" id="chat-input" placeholder="写下你的故事..."></textarea>
-                <div class="chat-actions">
-                    <button class="chat-action-btn" onclick="openSkillPicker()">@ 技能</button>
-                    <button class="chat-action-btn" onclick="attachFile()"># 文件</button>
-                    <button class="chat-action-btn" onclick="rollDice()">🎲</button>
-                    <button class="chat-send-btn" onclick="sendMessage()">➤</button>
-                </div>
+        <!-- 整合式底部输入区 -->
+        <div class="chat-composer">
+            <div class="composer-top">
+                <button class="composer-search-btn" onclick="showWebSearch()">🌐 联网搜索</button>
+            </div>
+            <div class="composer-input-box">
+                <textarea class="composer-textarea" id="chat-input" placeholder="写下你的故事..."></textarea>
+            </div>
+            <div class="composer-toolbar">
+                <button class="composer-btn" onclick="openSkillPicker()">@ 技能</button>
+                <button class="composer-btn" onclick="attachFile()"># 文件</button>
+                <button class="composer-btn" onclick="showModelIndicator()">⚙ 默认</button>
+                <button class="composer-btn" onclick="showMemory()">🧠</button>
+                <button class="composer-btn" onclick="rollDice()">🎲</button>
+                <button class="composer-send" onclick="sendMessage()">➤</button>
             </div>
         </div>
     `;
@@ -540,8 +511,17 @@ async function sendMessage() {
 
     input.value = '';
     const messagesBox = document.getElementById('chat-messages');
-    const welcome = messagesBox.querySelector('.chat-welcome');
-    if (welcome) welcome.remove();
+    
+    // 竞品风格：消息区域从隐藏切换为显示
+    if (messagesBox) {
+        messagesBox.style.display = 'flex';
+    }
+
+    // 隐藏首页内容（hero、卡片等），切换到对话模式
+    const hero = document.querySelector('.chat-hero');
+    const actionList = document.querySelector('.chat-action-list');
+    if (hero) hero.style.display = 'none';
+    if (actionList) actionList.style.display = 'none';
 
     // 用户消息
     const userMsg = document.createElement('div');
