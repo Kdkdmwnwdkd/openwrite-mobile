@@ -6,10 +6,10 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.1.0',
+    VERSION: '2.2.0',
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
-    DB_VERSION: 2
+    DB_VERSION: 3
 };
 
 // ===== IndexedDB Store =====
@@ -44,6 +44,10 @@ const db = {
                 }
                 if (!db.objectStoreNames.contains('templates')) {
                     db.createObjectStore('templates', { keyPath: 'id' });
+                }
+                // v3: Skill 广场（用户自定义技能上传）
+                if (!db.objectStoreNames.contains('skillStore')) {
+                    db.createObjectStore('skillStore', { keyPath: 'id' });
                 }
             };
         });
@@ -407,6 +411,8 @@ function navigateTo(page, params = {}) {
         skillDetail: () => renderSkillDetail(params.skillId),
         skillUse: () => renderSkillUse(params.skillId, params.mode),
         skillHistory: renderSkillHistory,
+        // Skill 广场
+        skillPlaza: renderSkillPlaza,
         // 蒸馏
         distill: renderDistill,
         distillTemplates: renderDistillTemplates,
@@ -422,6 +428,7 @@ function navigateTo(page, params = {}) {
 function renderChat(container) {
     ui.setPageTitle('新对话');
     ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('skillPlaza')">🏪 Skill广场</button>
         <button class="header-btn" onclick="showModelIndicator()">${store.modelName || 'glm-5.1'}</button>
     `);
 
@@ -630,7 +637,7 @@ function attachFile() { ui.showToast('文件功能开发中...'); }
 function rollDice() { ui.showToast(`🎲 ${Math.floor(Math.random() * 6) + 1}`); }
 function webSearch() { ui.showToast('联网搜索功能开发中...'); }
 
-// ===== Bookshelf Page =====
+// ===== Bookshelf Page (v2.2.0 with stats dashboard) =====
 async function renderBookshelf(container) {
     ui.setPageTitle('我的小说');
     ui.setHeaderActions(`
@@ -640,18 +647,61 @@ async function renderBookshelf(container) {
 
     try {
         const novels = await novelManager.list();
+        const stats = await novelManager.getStats();
         store.novels = novels;
 
         if (novels.length === 0) {
-            ui.showEmptyState(container, {
-                icon: '📖',
-                title: '书架空空如也',
-                desc: '点击右上角 + 新建开始创作你的第一部小说'
-            });
+            container.innerHTML = `
+                <div class="stats-dashboard">
+                    <div class="stats-dashboard-title">📊 数据统计</div>
+                    <div class="stats-grid-3">
+                        <div class="stat-card">
+                            <div class="stat-card-icon">📚</div>
+                            <div class="stat-card-value">0</div>
+                            <div class="stat-card-label">作品总数</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-icon">📝</div>
+                            <div class="stat-card-value">0</div>
+                            <div class="stat-card-label">章节总数</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-icon">📊</div>
+                            <div class="stat-card-value">0</div>
+                            <div class="stat-card-label">总字数</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="empty-state">
+                    <div class="empty-icon">📖</div>
+                    <div class="empty-title">书架空空如也</div>
+                    <div class="empty-desc">点击右上角 + 新建开始创作你的第一部小说</div>
+                </div>
+            `;
             return;
         }
 
         container.innerHTML = `
+            <div class="stats-dashboard">
+                <div class="stats-dashboard-title">📊 数据统计</div>
+                <div class="stats-grid-3">
+                    <div class="stat-card">
+                        <div class="stat-card-icon">📚</div>
+                        <div class="stat-card-value">${stats.totalNovels}</div>
+                        <div class="stat-card-label">作品总数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-icon">📝</div>
+                        <div class="stat-card-value">${stats.totalChapters}</div>
+                        <div class="stat-card-label">章节总数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-icon">📊</div>
+                        <div class="stat-card-value">${(stats.totalWords).toLocaleString()}</div>
+                        <div class="stat-card-label">总字数</div>
+                    </div>
+                </div>
+            </div>
             <div class="novel-list">
                 ${novels.map(novel => `
                     <div class="novel-item" onclick="navigateTo('novelDetail', { novelId: '${novel.id}' })">
@@ -773,13 +823,12 @@ function renderWriting(container) {
         </div>`;
 }
 
-// ===== Settings Page =====
+// ===== Settings Page (v2.2.0 - stats moved to bookshelf) =====
 async function renderSettings(container) {
     ui.setPageTitle('设置');
     ui.setHeaderActions();
 
     const config = await settings.getModelConfig();
-    const stats = await novelManager.getStats();
     let tplCount = 0;
     try {
         const tpls = await db.getAll('templates');
@@ -805,6 +854,16 @@ async function renderSettings(container) {
                     <div>
                         <div class="settings-label">Skill 管理</div>
                         <div class="settings-value">浏览、导入与管理写作技能</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+            <div class="settings-item" onclick="navigateTo('skillPlaza')">
+                <div class="settings-item-left">
+                    <div class="settings-icon">🏪</div>
+                    <div>
+                        <div class="settings-label">Skill 广场</div>
+                        <div class="settings-value">发现与分享写作技能</div>
                     </div>
                 </div>
                 <span class="settings-arrow">›</span>
@@ -842,28 +901,6 @@ async function renderSettings(container) {
                     </div>
                 </div>
                 <span class="settings-arrow">›</span>
-            </div>
-        </div>
-
-        <div class="settings-group">
-            <div class="settings-group-title">数据统计</div>
-            <div class="settings-item">
-                <div class="settings-item-left">
-                    <div class="settings-icon">📚</div>
-                    <div><div class="settings-label">作品总数</div><div class="settings-value">${stats.totalNovels} 部</div></div>
-                </div>
-            </div>
-            <div class="settings-item">
-                <div class="settings-item-left">
-                    <div class="settings-icon">📝</div>
-                    <div><div class="settings-label">章节总数</div><div class="settings-value">${stats.totalChapters} 章</div></div>
-                </div>
-            </div>
-            <div class="settings-item">
-                <div class="settings-item-left">
-                    <div class="settings-icon">📊</div>
-                    <div><div class="settings-label">总字数</div><div class="settings-value">${stats.totalWords.toLocaleString()} 字</div></div>
-                </div>
             </div>
         </div>
 
@@ -1240,3 +1277,398 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // Prevent double-tap zoom
 document.addEventListener('dblclick', (e) => { e.preventDefault(); }, { passive: false });
+
+// ===== Skill Plaza System (v2.2.0) =====
+const PLAZA_CATEGORIES = [
+    { key: 'all', label: '全部', icon: '🔹' },
+    { key: 'de-ai', label: '去AI润色', icon: '🧪' },
+    { key: 'style', label: '风格文笔', icon: '✍️' },
+    { key: 'pipeline', label: '全流程引擎', icon: '⚙️' },
+    { key: 'outline', label: '大纲设定', icon: '📋' },
+    { key: 'review', label: '审稿质检', icon: '🔍' },
+    { key: 'tools', label: '工具效率', icon: '🛠️' },
+    { key: 'genre', label: '题材专项', icon: '🎭' },
+    { key: 'other', label: '其他', icon: '📦' }
+];
+
+const PLAZA_TYPES = [
+    { key: 'all', label: '全部', icon: '🔹' },
+    { key: 'default', label: '默认', icon: '📄' },
+    { key: 'terminal', label: '终端', icon: '💻' }
+];
+
+const skillStoreManager = {
+    async list() {
+        try { return await db.getAll('skillStore'); } catch (e) { return []; }
+    },
+    async get(id) {
+        try { return await db.get('skillStore', id); } catch (e) { return null; }
+    },
+    async put(skill) {
+        await db.put('skillStore', skill);
+    },
+    async delete(id) {
+        await db.delete('skillStore', id);
+    },
+    async getNickname() {
+        try {
+            const rec = await db.get('settings', 'plazaNickname');
+            return rec ? rec.value : '';
+        } catch (e) { return ''; }
+    },
+    async setNickname(nickname) {
+        await db.put('settings', { key: 'plazaNickname', value: nickname, updated: Date.now() });
+    }
+};
+
+function renderSkillPlaza(container) {
+    ui.setPageTitle('Skill 广场');
+    ui.setHeaderActions();
+    store.plazaTab = store.plazaTab || 'browse';
+    store.plazaFilterCategory = store.plazaFilterCategory || 'all';
+    store.plazaFilterType = store.plazaFilterType || 'all';
+    store.plazaSearch = store.plazaSearch || '';
+
+    container.innerHTML = `
+        <div class="plaza-header">
+            <div class="plaza-header-icon">🏪</div>
+            <div class="plaza-header-title">Skill 广场</div>
+        </div>
+        <div class="tab-nav" id="plaza-tabs">
+            <button class="tab-item ${store.plazaTab === 'browse' ? 'active' : ''}" onclick="switchPlazaTab('browse')">浏览</button>
+            <button class="tab-item ${store.plazaTab === 'upload' ? 'active' : ''}" onclick="switchPlazaTab('upload')">上传</button>
+            <button class="tab-item ${store.plazaTab === 'my' ? 'active' : ''}" onclick="switchPlazaTab('my')">我的上传</button>
+        </div>
+        <div id="plaza-content"></div>
+    `;
+
+    const content = document.getElementById('plaza-content');
+    if (store.plazaTab === 'browse') renderSkillPlazaBrowse(content);
+    else if (store.plazaTab === 'upload') renderSkillPlazaUpload(content);
+    else renderSkillPlazaMyUploads(content);
+}
+
+async function renderSkillPlazaBrowse(container) {
+    const allSkills = await skillStoreManager.list();
+    let filtered = allSkills;
+
+    if (store.plazaFilterCategory !== 'all') {
+        filtered = filtered.filter(s => (s.category || 'other') === store.plazaFilterCategory);
+    }
+    if (store.plazaFilterType !== 'all') {
+        filtered = filtered.filter(s => (s.type || 'default') === store.plazaFilterType);
+    }
+    if (store.plazaSearch.trim()) {
+        const kw = store.plazaSearch.trim().toLowerCase();
+        filtered = filtered.filter(s =>
+            (s.name || '').toLowerCase().includes(kw) ||
+            (s.description || '').toLowerCase().includes(kw) ||
+            (s.author || '').toLowerCase().includes(kw)
+        );
+    }
+
+    const filterHtml = PLAZA_CATEGORIES.map(c =>
+        `<button class="filter-chip ${store.plazaFilterCategory === c.key ? 'active' : ''}" onclick="togglePlazaCategory('${c.key}')">
+            <span class="chip-icon">${c.icon}</span>${c.label}
+        </button>`
+    ).join('');
+
+    const typeHtml = PLAZA_TYPES.map(t =>
+        `<button class="filter-chip ${store.plazaFilterType === t.key ? 'active' : ''}" onclick="togglePlazaType('${t.key}')">
+            <span class="chip-icon">${t.icon}</span>${t.label}
+        </button>`
+    ).join('');
+
+    const searchHtml = `
+        <div class="search-bar">
+            <div class="search-input-wrapper">
+                <span class="search-icon">🔍</span>
+                <input type="text" class="search-input" id="plaza-search" placeholder="搜索Skill..." value="${escapeHtml(store.plazaSearch)}" oninput="plazaSearchInput(this.value)">
+            </div>
+            <select class="search-filter" onchange="plazaFilterChange(this.value)">
+                <option value="latest">最新</option>
+                <option value="popular">最热</option>
+            </select>
+        </div>
+    `;
+
+    const listHtml = filtered.length === 0
+        ? `<div class="empty-state" style="padding: 40px 20px;">
+            <div class="empty-icon">🏪</div>
+            <div class="empty-title">暂无 Skill</div>
+            <div class="empty-desc">去「上传」Tab 添加你的第一个 Skill 吧</div>
+          </div>`
+        : filtered.map(skill => `
+            <div class="skill-plaza-card" onclick="downloadPlazaSkill('${skill.id}')">
+                <div class="skill-avatar">${getAvatarForSkill(skill.name)}</div>
+                <div class="skill-plaza-body">
+                    <div class="skill-plaza-title">${escapeHtml(skill.name)}</div>
+                    <div class="skill-plaza-desc">${escapeHtml(skill.description || '暂无描述')}</div>
+                    <div class="skill-plaza-meta">
+                        <span class="skill-plaza-author">by ${escapeHtml(skill.author || '匿名')}</span>
+                        <span class="skill-plaza-downloads">⬇ ${formatDownloads(skill.downloads)}</span>
+                    </div>
+                </div>
+                <button class="skill-download-btn" onclick="event.stopPropagation(); downloadPlazaSkill('${skill.id}')">下载</button>
+            </div>
+        `).join('');
+
+    container.innerHTML = `
+        ${searchHtml}
+        <div class="filter-section">
+            <div class="filter-row">${filterHtml}</div>
+            <div class="filter-row">${typeHtml}</div>
+            <div style="font-size:12px;color:var(--text-tertiary);margin-top:4px;">今日下载 0/10 次</div>
+        </div>
+        <div class="skill-list">${listHtml}</div>
+    `;
+}
+
+async function renderSkillPlazaUpload(container) {
+    const nickname = await skillStoreManager.getNickname();
+    const builtinOptions = BUILTIN_SKILLS.map(s => `<option value="${s.id}">${s.icon} ${s.name}</option>`).join('');
+
+    container.innerHTML = `
+        <div class="upload-form">
+            <div class="form-group">
+                <label class="form-label">昵称设置</label>
+                <div class="form-row">
+                    <input type="text" class="form-input" id="plaza-nickname" placeholder="输入昵称（上传时显示）" value="${escapeHtml(nickname)}">
+                    <button class="btn btn-secondary" style="white-space:nowrap;" onclick="savePlazaNickname()">保存昵称</button>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">选择 Skill</label>
+                <select class="form-select" id="plaza-skill-select">
+                    <option value="">选择要上传的 Skill</option>
+                    ${builtinOptions}
+                    <option value="custom">自定义 Skill...</option>
+                </select>
+            </div>
+            <div id="plaza-custom-skill" style="display:none;">
+                <div class="form-group">
+                    <label class="form-label">Skill 名称</label>
+                    <input type="text" class="form-input" id="plaza-custom-name" placeholder="输入 Skill 名称">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Skill 内容</label>
+                    <textarea class="form-textarea" id="plaza-custom-content" placeholder="粘贴 Skill 的完整提示词内容..."></textarea>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Skill 类型</label>
+                <div class="filter-row">
+                    <button class="filter-chip active" id="plaza-type-default" onclick="selectPlazaType('default')">📄 默认</button>
+                    <button class="filter-chip" id="plaza-type-terminal" onclick="selectPlazaType('terminal')">💻 终端</button>
+                </div>
+                <div style="font-size:12px;color:var(--text-tertiary);margin-top:4px;">使用提示词和参考文本，可在手机与电脑端使用。</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">分类</label>
+                <div class="filter-row">
+                    ${PLAZA_CATEGORIES.slice(1).map(c =>
+                        `<button class="filter-chip" id="plaza-cat-${c.key}" onclick="selectPlazaCategory('${c.key}')">${c.icon} ${c.label}</button>`
+                    ).join('')}
+                </div>
+                <div style="font-size:12px;color:var(--text-tertiary);margin-top:4px;">不选则按名称自动归类。</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">描述</label>
+                <textarea class="form-textarea" id="plaza-desc" placeholder="简要描述 Skill 的功能和用途..."></textarea>
+            </div>
+            <button class="upload-submit-btn" onclick="uploadPlazaSkill()">
+                <span>☁️</span> 上传到广场
+            </button>
+        </div>
+    `;
+
+    document.getElementById('plaza-skill-select').addEventListener('change', function() {
+        const customDiv = document.getElementById('plaza-custom-skill');
+        customDiv.style.display = this.value === 'custom' ? 'block' : 'none';
+    });
+}
+
+async function renderSkillPlazaMyUploads(container) {
+    const allSkills = await skillStoreManager.list();
+    const myNickname = await skillStoreManager.getNickname();
+    const mySkills = allSkills.filter(s => s.author === myNickname || s.isLocal);
+
+    const listHtml = mySkills.length === 0
+        ? `<div class="empty-state" style="padding: 40px 20px;">
+            <div class="empty-icon">📦</div>
+            <div class="empty-title">暂无上传</div>
+            <div class="empty-desc">你还没有上传过任何 Skill</div>
+          </div>`
+        : mySkills.map(skill => `
+            <div class="skill-plaza-card">
+                <div class="skill-avatar">${getAvatarForSkill(skill.name)}</div>
+                <div class="skill-plaza-body">
+                    <div class="skill-plaza-title">${escapeHtml(skill.name)}</div>
+                    <div class="skill-plaza-desc">${escapeHtml(skill.description || '暂无描述')}</div>
+                    <div class="skill-plaza-meta">
+                        <span class="skill-plaza-author">by ${escapeHtml(skill.author || '匿名')}</span>
+                        <span class="skill-plaza-downloads">⬇ ${formatDownloads(skill.downloads)}</span>
+                    </div>
+                </div>
+                <button class="skill-download-btn" style="border-color:var(--danger);color:var(--danger);" onclick="deletePlazaSkill('${skill.id}')">删除</button>
+            </div>
+        `).join('');
+
+    container.innerHTML = `<div class="skill-list">${listHtml}</div>`;
+}
+
+// ===== Plaza Actions =====
+function switchPlazaTab(tab) {
+    store.plazaTab = tab;
+    const content = document.getElementById('plaza-content');
+    document.querySelectorAll('#plaza-tabs .tab-item').forEach(t => t.classList.remove('active'));
+    event.target.classList.add('active');
+    if (tab === 'browse') renderSkillPlazaBrowse(content);
+    else if (tab === 'upload') renderSkillPlazaUpload(content);
+    else renderSkillPlazaMyUploads(content);
+}
+
+function plazaSearchInput(value) {
+    store.plazaSearch = value;
+    if (store.plazaTab === 'browse') {
+        const content = document.getElementById('plaza-content');
+        renderSkillPlazaBrowse(content);
+    }
+}
+
+function plazaFilterChange(value) {
+    // 排序逻辑预留
+    ui.showToast('排序: ' + (value === 'popular' ? '最热' : '最新'));
+}
+
+function togglePlazaCategory(key) {
+    store.plazaFilterCategory = store.plazaFilterCategory === key ? 'all' : key;
+    if (store.plazaTab === 'browse') {
+        const content = document.getElementById('plaza-content');
+        renderSkillPlazaBrowse(content);
+    }
+}
+
+function togglePlazaType(key) {
+    store.plazaFilterType = store.plazaFilterType === key ? 'all' : key;
+    if (store.plazaTab === 'browse') {
+        const content = document.getElementById('plaza-content');
+        renderSkillPlazaBrowse(content);
+    }
+}
+
+function selectPlazaType(type) {
+    document.querySelectorAll('[id^="plaza-type-"]').forEach(el => el.classList.remove('active'));
+    document.getElementById('plaza-type-' + type).classList.add('active');
+    store.plazaUploadType = type;
+}
+
+function selectPlazaCategory(cat) {
+    document.querySelectorAll('[id^="plaza-cat-"]').forEach(el => el.classList.remove('active'));
+    document.getElementById('plaza-cat-' + cat).classList.add('active');
+    store.plazaUploadCategory = cat;
+}
+
+async function savePlazaNickname() {
+    const nickname = document.getElementById('plaza-nickname').value.trim();
+    if (!nickname) { ui.showToast('请输入昵称'); return; }
+    await skillStoreManager.setNickname(nickname);
+    ui.showToast('昵称已保存: ' + nickname);
+}
+
+async function uploadPlazaSkill() {
+    const nickname = await skillStoreManager.getNickname();
+    if (!nickname) { ui.showToast('请先设置昵称'); document.getElementById('plaza-nickname').focus(); return; }
+
+    const skillSelect = document.getElementById('plaza-skill-select').value;
+    let name, content, description;
+
+    if (skillSelect === 'custom') {
+        name = document.getElementById('plaza-custom-name').value.trim();
+        content = document.getElementById('plaza-custom-content').value.trim();
+        if (!name) { ui.showToast('请输入 Skill 名称'); return; }
+        if (!content) { ui.showToast('请输入 Skill 内容'); return; }
+    } else if (skillSelect) {
+        const builtin = BUILTIN_SKILLS.find(s => s.id === skillSelect);
+        if (!builtin) { ui.showToast('选择的 Skill 不存在'); return; }
+        name = builtin.name;
+        content = builtin.content;
+    } else {
+        ui.showToast('请选择或填写 Skill'); return;
+    }
+
+    description = document.getElementById('plaza-desc').value.trim();
+    const type = store.plazaUploadType || 'default';
+    const category = store.plazaUploadCategory || 'other';
+
+    const skill = {
+        id: 'plaza_' + Date.now(),
+        name,
+        content,
+        description: description || name,
+        author: nickname,
+        type,
+        category,
+        downloads: 0,
+        isLocal: true,
+        created: Date.now()
+    };
+
+    await skillStoreManager.put(skill);
+    ui.showToast('Skill 上传成功！');
+    switchPlazaTab('browse');
+}
+
+async function downloadPlazaSkill(id) {
+    const skill = await skillStoreManager.get(id);
+    if (!skill) { ui.showToast('Skill 不存在'); return; }
+
+    // 导入到 skills store（技能中心可用）
+    const importedSkill = {
+        id: skill.id,
+        name: skill.name,
+        icon: '📦',
+        enabled: true,
+        category: skill.category || '自定义',
+        version: 'v1.0',
+        description: skill.description || skill.name,
+        content: skill.content || ''
+    };
+
+    // 检查是否已存在
+    const existing = await skillManager.get(skill.id);
+    if (existing) {
+        ui.showToast('该 Skill 已在技能中心');
+    } else {
+        await skillManager.put(importedSkill);
+        skill.downloads = (skill.downloads || 0) + 1;
+        await skillStoreManager.put(skill);
+        ui.showToast(`已下载: ${skill.name}`);
+    }
+}
+
+async function deletePlazaSkill(id) {
+    if (!confirm('确定要删除这个 Skill 吗？')) return;
+    await skillStoreManager.delete(id);
+    ui.showToast('已删除');
+    const content = document.getElementById('plaza-content');
+    renderSkillPlazaMyUploads(content);
+}
+
+// ===== Plaza Helpers =====
+function getAvatarForSkill(name) {
+    if (!name) return '?';
+    const char = name.trim().charAt(0);
+    return /[\u4e00-\u9fa5]/.test(char) ? char : char.toUpperCase();
+}
+
+function getCategoryLabel(key) {
+    const cat = PLAZA_CATEGORIES.find(c => c.key === key);
+    return cat ? cat.label : key;
+}
+
+function formatDownloads(n) {
+    if (!n) return '0';
+    if (n >= 10000) return (n / 10000).toFixed(1) + '万';
+    return String(n);
+}
