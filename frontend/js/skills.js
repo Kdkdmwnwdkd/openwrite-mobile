@@ -183,10 +183,13 @@ const skillManager = {
         let saved = [];
         try { saved = await db.getAll('skills'); } catch (e) { saved = []; }
         // 合并内置技能与用户保存的状态
-        return BUILTIN_SKILLS.map(builtin => {
+        const result = BUILTIN_SKILLS.map(builtin => {
             const record = saved.find(s => s.id === builtin.id);
             return record ? { ...builtin, enabled: record.enabled } : { ...builtin };
         });
+        // 包含用户自定义技能（从广场下载的）
+        const customSkills = saved.filter(s => !BUILTIN_SKILLS.some(b => b.id === s.id));
+        return [...result, ...customSkills.map(s => ({ ...s, enabled: s.enabled !== false }))];
     },
 
     async get(id) {
@@ -213,6 +216,15 @@ const skillManager = {
 
     async getReview(id) {
         try { return await db.get('reviews', id); } catch (e) { return null; }
+    },
+
+    async listActive() {
+        const all = await this.getAll();
+        return all.filter(s => s.enabled !== false);
+    },
+
+    async put(skill) {
+        await db.put('skills', { ...skill, updated: Date.now() });
     }
 };
 
