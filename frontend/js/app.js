@@ -6,10 +6,10 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.2.0',
+    VERSION: '2.2.1',
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
-    DB_VERSION: 3
+    DB_VERSION: 4
 };
 
 // ===== IndexedDB Store =====
@@ -48,6 +48,10 @@ const db = {
                 // v3: Skill 广场（用户自定义技能上传）
                 if (!db.objectStoreNames.contains('skillStore')) {
                     db.createObjectStore('skillStore', { keyPath: 'id' });
+                }
+                // v4: 备忘录系统
+                if (!db.objectStoreNames.contains('memos')) {
+                    db.createObjectStore('memos', { keyPath: 'id' });
                 }
             };
         });
@@ -428,7 +432,11 @@ function navigateTo(page, params = {}) {
 function renderChat(container) {
     ui.setPageTitle('新对话');
     // 竞品风格：无顶部操作按钮，模型名在标题下方显示
-    ui.setHeaderActions('');
+    ui.setHeaderActions(`
+        <button class="hamburger-btn" onclick="openChatDrawer()">
+            <span></span><span></span><span></span>
+        </button>
+    `);
 
     container.innerHTML = `
         <div style="padding: 0 16px; display: flex; flex-direction: column; height: calc(100vh - 120px); overflow-y: auto;">
@@ -1651,4 +1659,273 @@ function formatDownloads(n) {
     if (!n) return '0';
     if (n >= 10000) return (n / 10000).toFixed(1) + '万';
     return String(n);
+}
+
+// ===== Chat Drawer & Session Management =====
+
+let chatDrawerBatchMode = false;
+
+function openChatDrawer() {
+    const overlay = document.getElementById('drawer-overlay');
+    const drawer = document.getElementById('chat-drawer');
+    if (overlay && drawer) {
+        overlay.classList.add('active');
+        drawer.classList.add('active');
+        renderChatDrawer();
+    }
+}
+
+function closeChatDrawer() {
+    const overlay = document.getElementById('drawer-overlay');
+    const drawer = document.getElementById('chat-drawer');
+    if (overlay && drawer) {
+        overlay.classList.remove('active');
+        drawer.classList.remove('active');
+    }
+}
+
+async function renderChatDrawer() {
+    const listEl = document.getElementById('drawer-list');
+    if (!listEl) return;
+
+    try {
+        const allMessages = await db.getAll('messages');
+        
+        // 按 sessionId 分组
+        const sessions = {};
+        allMessages.forEach(msg => {
+            const sid = msg.sessionId || 'default';
+            if (!sessions[sid]) {
+                sessions[sid] = {
+                    id: sid,
+                    messages: [],
+                    lastTime: msg.created || Date.now(),
+                    title: ''
+                };
+            }
+            sessions[sid].messages.push(msg);
+            if (msg.created && msg.created > sessions[sid].lastTime) {
+                sessions[sid].lastTime = msg.created;
+            }
+        });
+
+        // 为每个会话提取标题（第一条用户消息的前20字）
+        Object.values(sessions).forEach(s => {
+            const firstUser = s.messages.find(m => m.role === 'user');
+            s.title = firstUser ? firstUser.content.substring(0, 20) + (firstUser.content.length > 20 ? '...' : '') : '新对话';
+        });
+
+        // 按时间排序
+        const sorted = Object.values(sessions).sort((a, b) => b.lastTime - a.lastTime);
+
+        if (sorted.length === 0) {
+            listEl.innerHTML = '<div class="drawer-empty">暂无对话记录</div>';
+            return;
+        }
+
+        // 按日期分组
+        const today = new Date().setHours(0,0,0,0);
+        const yesterday = today - 86400000;
+        
+        let html = '';
+        let currentGroup = '';
+        
+        sorted.forEach(session => {
+            const date = new Date(session.lastTime);
+            const dateStr = date.setHours(0,0,0,0);
+            let groupLabel;
+            if (dateStr === today) groupLabel = '今天';
+            else if (dateStr === yesterday) groupLabel = '昨天';
+            else groupLabel = `${date.getMonth()+1}月${date.getDate()}日`;
+            
+            if (groupLabel !== currentGroup) {
+                currentGroup = groupLabel;
+                html += `<div class="drawer-date-group">${groupLabel}</div>`;
+            }
+
+            const isActive = store.currentSessionId === session.id;
+            const timeStr = `${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`;
+            
+            html += `
+                <div class="drawer-item ${isActive ? 'active-session' : ''}" onclick="switchChatSession('${session.id}')">
+                    <div class="drawer-item-icon">💬</div>
+                    <div class="drawer-item-text">
+                        <div class="drawer-item-title">${escapeHtml(session.title)}</div>
+                        <div class="drawer-item-meta">${session.messages.length}条 · ${timeStr}</div>
+                    </div>
+                    <button class="drawer-item-delete ${chatDrawerBatchMode ? 'visible' : ''}" onclick="event.stopPropagation(); deleteChatSession('${session.id}')">🗑</button>
+                </div>
+            `;
+        });
+
+        listEl.innerHTML = html;
+    } catch (e) {
+        listEl.innerHTML = '<div class="drawer-empty">加载失败</div>';
+    }
+}
+
+function startNewChatSession() {
+    store.currentSessionId = 'chat_' + Date.now();
+    store.chatMessages = [];
+    store.activeChatSkill = null;
+    closeChatDrawer();
+    navigateTo('chat');
+}
+
+async function switchChatSession(sessionId) {
+    store.currentSessionId = sessionId;
+    closeChatDrawer();
+    navigateTo('chat');
+    
+    // 加载该会话的消息
+    try {
+        const msgs = await db.getAll('messages', 'sessionId', sessionId);
+        store.chatMessages = msgs.sort((a, b) => (a.created || 0) - (b.created || 0));
+        
+        // 更新UI显示消息
+        const container = document.getElementById('chat-view');
+        if (container) {
+            // 隐藏hero和卡片，显示消息
+            const hero = container.querySelector('.chat-hero');
+            const actionList = container.querySelector('.chat-action-list');
+            const messagesBox = container.querySelector('#chat-messages');
+            if (hero) hero.style.display = 'none';
+            if (actionList) actionList.style.display = 'none';
+            if (messagesBox) {
+                messagesBox.style.display = 'flex';
+                messagesBox.innerHTML = store.chatMessages.map(m => `
+                    <div class="msg-row ${m.role}">
+                        <div class="msg-bubble ${m.role}">${escapeHtml(m.content).replace(/\n/g, '<br>')}</div>
+                    </div>
+                `).join('');
+            }
+        }
+    } catch (e) {
+        console.error('加载会话失败:', e);
+    }
+}
+
+async function deleteChatSession(sessionId) {
+    if (!confirm('确定要删除这个会话吗？')) return;
+    
+    try {
+        const msgs = await db.getAll('messages', 'sessionId', sessionId);
+        for (const msg of msgs) {
+            await db.delete('messages', msg.id);
+        }
+        
+        // 如果删除的是当前会话，重置
+        if (store.currentSessionId === sessionId) {
+            store.currentSessionId = 'chat_' + Date.now();
+            store.chatMessages = [];
+        }
+        
+        ui.showToast('会话已删除');
+        renderChatDrawer();
+    } catch (e) {
+        ui.showToast('删除失败');
+    }
+}
+
+function toggleBatchDelete() {
+    chatDrawerBatchMode = !chatDrawerBatchMode;
+    const btn = document.querySelector('.drawer-batch-btn');
+    if (btn) btn.classList.toggle('active', chatDrawerBatchMode);
+    renderChatDrawer();
+}
+
+// ===== Memo System =====
+
+const MEMO_CATEGORIES = [
+    { key: 'default', label: '默认', icon: '📝' },
+    { key: 'inspiration', label: '灵感', icon: '💡' },
+    { key: 'outline', label: '大纲', icon: '📋' }
+];
+
+async function showMemo() {
+    const container = document.getElementById('chat-view');
+    if (!container) return;
+    
+    const memos = await db.getAll('memos') || [];
+    const currentCategory = store.memoCategory || 'default';
+    const filtered = memos.filter(m => m.category === currentCategory).sort((a, b) => (b.updated || 0) - (a.updated || 0));
+    
+    const modal = createModal('备忘录', `
+        <div style="margin-bottom: 16px;">
+            <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                ${MEMO_CATEGORIES.map(c => `
+                    <button class="filter-chip ${currentCategory === c.key ? 'active' : ''}" onclick="filterMemos('${c.key}')">
+                        ${c.icon} ${c.label}
+                    </button>
+                `).join('')}
+            </div>
+            <button class="btn btn-primary btn-block" onclick="showCreateMemoModal()">+ 新建备忘录</button>
+        </div>
+        <div class="memo-list">
+            ${filtered.length === 0 ? '<div class="empty-state" style="padding: 40px 20px;"><div class="empty-title">暂无备忘录</div></div>' : 
+                filtered.map(m => `
+                    <div class="card" style="cursor: pointer;" onclick="viewMemo('${m.id}')">
+                        <div class="card-title">${escapeHtml(m.title)}</div>
+                        <div class="card-subtitle">${escapeHtml(m.content.substring(0, 60))}${m.content.length > 60 ? '...' : ''}</div>
+                        <div style="font-size: 12px; color: var(--text-tertiary);">${formatDate(m.updated)}</div>
+                    </div>
+                `).join('')}
+        </div>
+    `);
+    modal.show();
+}
+
+function filterMemos(category) {
+    store.memoCategory = category;
+    showMemo();
+}
+
+function showCreateMemoModal() {
+    const modal = createModal('新建备忘录', `
+        <div class="form-group">
+            <label class="form-label">标题</label>
+            <input type="text" class="form-input" id="memo-title" placeholder="输入标题">
+        </div>
+        <div class="form-group">
+            <label class="form-label">分类</label>
+            <select class="form-select" id="memo-category">
+                ${MEMO_CATEGORIES.map(c => `<option value="${c.key}">${c.icon} ${c.label}</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">内容</label>
+            <textarea class="form-textarea" id="memo-content" placeholder="写下你的想法..."></textarea>
+        </div>
+        <button class="btn btn-primary btn-block" onclick="saveMemo()">保存</button>
+    `);
+    modal.show();
+}
+
+async function saveMemo() {
+    const title = document.getElementById('memo-title').value.trim();
+    const content = document.getElementById('memo-content').value.trim();
+    const category = document.getElementById('memo-category').value;
+    
+    if (!title || !content) {
+        ui.showToast('请填写标题和内容');
+        return;
+    }
+    
+    const memo = {
+        id: 'memo_' + Date.now(),
+        title,
+        content,
+        category,
+        created: Date.now(),
+        updated: Date.now()
+    };
+    
+    await db.put('memos', memo);
+    ui.showToast('备忘录已保存');
+    showMemo();
+}
+
+function viewMemo(id) {
+    // 可以查看/编辑备忘录详情
+    ui.showToast('备忘录查看功能开发中');
 }
