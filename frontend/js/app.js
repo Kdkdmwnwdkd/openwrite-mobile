@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.2.1',
+    VERSION: '2.3.0',
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 4
@@ -101,6 +101,43 @@ const db = {
             req.onsuccess = () => resolve();
             req.onerror = () => reject(req.error);
         });
+    },
+
+    // ===== 备份/恢复支持 =====
+    STORES: ['novels', 'chapters', 'settings', 'messages', 'skills', 'reviews', 'templates', 'skillStore', 'memos'],
+
+    async exportAll() {
+        const database = await this.open();
+        const result = {};
+        for (const store of this.STORES) {
+            if (!database.objectStoreNames.contains(store)) continue;
+            result[store] = await this.getAll(store);
+        }
+        return {
+            app: CONFIG.APP_NAME,
+            version: CONFIG.VERSION,
+            exportedAt: new Date().toISOString(),
+            stores: result
+        };
+    },
+
+    async importAll(backup) {
+        const database = await this.open();
+        const stores = backup && backup.stores ? backup.stores : backup || {};
+        for (const store of this.STORES) {
+            if (!database.objectStoreNames.contains(store)) continue;
+            const records = stores[store];
+            if (!Array.isArray(records)) continue;
+            const tx = database.transaction(store, 'readwrite');
+            const os = tx.objectStore(store);
+            await new Promise((resolve, reject) => {
+                os.clear();
+                records.forEach(r => os.put(r));
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+        return true;
     }
 };
 
@@ -123,12 +160,24 @@ const settings = {
     },
     async setModelConfig(config) {
         await this.set('modelConfig', config);
+    },
+    async getRunConfig() {
+        return await this.get('runConfig', {
+            temperature: 0.7,
+            contextWindow: 8192,
+            maxOutput: 4000,
+            autoCompress: false,
+            systemPrompt: ''
+        });
+    },
+    async setRunConfig(config) {
+        await this.set('runConfig', config);
     }
 };
 
 // ===== AI API Client =====
 const ai = {
-    async chat(messages, onStream = null, maxTokens = 4000) {
+    async chat(messages, onStream = null, maxTokens = null) {
         const config = await settings.getModelConfig();
         if (!config.apiKey) {
             throw new Error('请先配置 API Key');
@@ -136,12 +185,40 @@ const ai = {
 
         const url = config.baseUrl ? `${config.baseUrl}/chat/completions` : 'https://api.deepseek.com/chat/completions';
 
+        // 应用运行参数配置（温度/上下文窗口/提示词）
+        const runConfig = await settings.getRunConfig();
+        let finalMessages = messages;
+        if (runConfig.systemPrompt && !messages.some(m => m.role === 'system' && m.content === runConfig.systemPrompt)) {
+            const sysIdx = finalMessages.findIndex(m => m.role === 'system');
+            if (sysIdx >= 0) {
+                finalMessages = [...finalMessages];
+                finalMessages[sysIdx] = { role: 'system', content: runConfig.systemPrompt + '\n\n' + finalMessages[sysIdx].content };
+            } else {
+                finalMessages = [{ role: 'system', content: runConfig.systemPrompt }, ...finalMessages];
+            }
+        }
+        // 自动压缩：按字符粗估 token（约 2 字符/token），超出上下文窗口时精简中间历史
+        if (runConfig.autoCompress && runConfig.contextWindow > 0) {
+            const totalChars = finalMessages.reduce((s, m) => s + (m.content || '').length, 0);
+            if (totalChars / 2 > runConfig.contextWindow) {
+                const head = finalMessages.slice(0, 1);       // 保留系统消息
+                const tail = finalMessages.slice(-3);          // 保留最近 3 条
+                const middle = finalMessages.slice(1, -3);
+                if (middle.length > 0) {
+                    const digest = middle.map(m => `${m.role}: ${(m.content || '').substring(0, 200)}...`).join('\n');
+                    finalMessages = [...head,
+                        { role: 'system', content: `[上下文自动压缩] 以下为较早对话的压缩摘要：\n${digest}` },
+                        ...tail];
+                }
+            }
+        }
+
         const body = {
             model: config.model || 'deepseek-chat',
-            messages: messages,
+            messages: finalMessages,
             stream: !!onStream,
-            temperature: 0.7,
-            max_tokens: maxTokens
+            temperature: runConfig.temperature,
+            max_tokens: maxTokens || runConfig.maxOutput
         };
 
         const response = await fetch(url, {
@@ -421,7 +498,11 @@ function navigateTo(page, params = {}) {
         distill: renderDistill,
         distillTemplates: renderDistillTemplates,
         distillResult: () => renderDistillResult(params.templateId),
-        distillWrite: () => renderDistillWrite(params.templateId)
+        distillWrite: () => renderDistillWrite(params.templateId),
+        // 参数配置
+        paramConfig: renderParamConfig,
+        // 数据管理
+        dataManage: renderDataManage
     };
 
     if (renderers[page]) renderers[page](view);
@@ -727,6 +808,10 @@ async function renderNovelDetail(container, novelId) {
         const chapters = await novelManager.listChapters(novelId);
         store.currentNovel = novel;
 
+        // Build tree data
+        const outlineItems = novel.outline || [];
+        const characters = novel.characters || [];
+        
         container.innerHTML = `
             <div class="novel-header-card">
                 <div class="novel-header-cover">${novel.title.charAt(0)}</div>
@@ -737,22 +822,77 @@ async function renderNovelDetail(container, novelId) {
                 </div>
             </div>
 
-            <div class="action-buttons-row">
+            <div class="action-buttons-row" style="margin-bottom: 12px;">
                 <button class="btn btn-primary" onclick="showWriteChapterModal('${novelId}')">✍️ 写新章节</button>
                 <button class="btn btn-secondary" onclick="aiWriteNext('${novelId}')">🤖 AI续写</button>
             </div>
 
-            <div class="chapter-list">
-                ${chapters.length === 0
-                    ? '<div class="empty-state" style="padding: 40px 20px;"><div class="empty-icon">📝</div><div class="empty-title">暂无章节</div></div>'
-                    : chapters.map(ch => `
-                        <div class="chapter-item" onclick="navigateTo('chapterEdit', { novelId: '${novelId}', chapterNum: ${ch.number} })">
-                            <span class="chapter-num">第${ch.number}章</span>
-                            <span class="chapter-title">${ch.title}</span>
-                            <span class="chapter-status written">${(ch.wordCount || 0).toLocaleString()}字</span>
-                        </div>
-                    `).join('')}
-            </div>`;
+            <!-- 目录树形结构 -->
+            <div class="novel-tree">
+                <!-- 大纲 -->
+                <div class="tree-folder" onclick="toggleTreeFolder(this)">
+                    <div class="tree-folder-header">
+                        <span class="tree-toggle">▼</span>
+                        <span class="tree-icon">📋</span>
+                        <span class="tree-label">大纲</span>
+                        <span class="tree-count">${outlineItems.length}项</span>
+                    </div>
+                    <div class="tree-folder-content">
+                        ${outlineItems.length === 0 
+                            ? '<div class="tree-empty">暂无大纲</div>'
+                            : outlineItems.map((item, idx) => `
+                                <div class="tree-file" onclick="event.stopPropagation(); viewOutlineItem('${novelId}', ${idx})">
+                                    <span class="tree-file-icon">📄</span>
+                                    <span class="tree-file-name">第${item.chapter}章 ${item.title}</span>
+                                    <span class="tree-file-meta">${item.summary?.substring(0, 20) || ''}...</span>
+                                </div>
+                            `).join('')}
+                    </div>
+                </div>
+
+                <!-- 资料 -->
+                <div class="tree-folder" onclick="toggleTreeFolder(this)">
+                    <div class="tree-folder-header">
+                        <span class="tree-toggle">▼</span>
+                        <span class="tree-icon">📁</span>
+                        <span class="tree-label">资料</span>
+                        <span class="tree-count">${characters.length}项</span>
+                    </div>
+                    <div class="tree-folder-content">
+                        ${characters.length === 0
+                            ? '<div class="tree-empty">暂无资料</div>'
+                            : characters.map((char, idx) => `
+                                <div class="tree-file" onclick="event.stopPropagation(); viewCharacter('${novelId}', ${idx})">
+                                    <span class="tree-file-icon">👤</span>
+                                    <span class="tree-file-name">${char.name}</span>
+                                    <span class="tree-file-meta">${char.role || '角色'}</span>
+                                </div>
+                            `).join('')}
+                    </div>
+                </div>
+
+                <!-- 章节/正文 -->
+                <div class="tree-folder expanded" onclick="toggleTreeFolder(this)">
+                    <div class="tree-folder-header">
+                        <span class="tree-toggle">▼</span>
+                        <span class="tree-icon">📝</span>
+                        <span class="tree-label">正文</span>
+                        <span class="tree-count">${chapters.length}章</span>
+                    </div>
+                    <div class="tree-folder-content">
+                        ${chapters.length === 0
+                            ? '<div class="tree-empty">暂无章节</div>'
+                            : chapters.map(ch => `
+                                <div class="tree-file" onclick="event.stopPropagation(); navigateTo('chapterEdit', { novelId: '${novelId}', chapterNum: ${ch.number} })">
+                                    <span class="tree-file-icon">📄</span>
+                                    <span class="tree-file-name">第${ch.number}章 ${ch.title}</span>
+                                    <span class="tree-file-meta">${(ch.wordCount || 0).toLocaleString()}字</span>
+                                </div>
+                            `).join('')}
+                    </div>
+                </div>
+            </div>
+        `;
     } catch (err) {
         ui.showEmptyState(container, { icon: '⚠️', title: '加载失败', desc: err.message });
     }
@@ -890,6 +1030,26 @@ async function renderSettings(container) {
                 </div>
                 <span class="settings-arrow">›</span>
             </div>
+            <div class="settings-item" onclick="navigateTo('paramConfig')">
+                <div class="settings-item-left">
+                    <div class="settings-icon">🎛️</div>
+                    <div>
+                        <div class="settings-label">参数配置</div>
+                        <div class="settings-value">温度、上下文窗口与提示词</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+            <div class="settings-item" onclick="navigateTo('dataManage')">
+                <div class="settings-item-left">
+                    <div class="settings-icon">💾</div>
+                    <div>
+                        <div class="settings-label">数据备份与恢复</div>
+                        <div class="settings-value">导出/导入全部数据</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
         </div>
 
         <div class="settings-group">
@@ -902,6 +1062,211 @@ async function renderSettings(container) {
                 <span class="settings-arrow">›</span>
             </div>
         </div>`;
+}
+
+// ===== Param Config Page (v2.3.0) =====
+async function renderParamConfig(container) {
+    ui.setPageTitle('参数配置');
+    ui.setHeaderActions(`<button class="header-btn" onclick="navigateTo('settings')">返回</button>`);
+
+    const cfg = await settings.getRunConfig();
+
+    container.innerHTML = `
+        <div class="settings-group">
+            <div class="settings-group-title">生成参数</div>
+            <div class="param-block">
+                <div class="param-row">
+                    <div>
+                        <div class="param-label">温度 <span class="param-value-inline" id="param-temp-val">${cfg.temperature}</span></div>
+                        <div class="param-hint">越大创作越自由（0.0-2.0），越小回答越稳定</div>
+                    </div>
+                    <input type="range" id="param-temp" class="param-range" min="0" max="2" step="0.1" value="${cfg.temperature}" oninput="updateTempLabel(this.value)">
+                </div>
+                <div class="param-row">
+                    <div>
+                        <div class="param-label">上下文窗口</div>
+                        <div class="param-hint">单次对话保留的最大 token 数，超出部分将被截断</div>
+                    </div>
+                    <input type="number" id="param-context" class="param-input" value="${cfg.contextWindow}" min="1024" max="131072" step="1024">
+                </div>
+                <div class="param-row">
+                    <div>
+                        <div class="param-label">最大输出</div>
+                        <div class="param-hint">单次回复生成的最大 token 数</div>
+                    </div>
+                    <input type="number" id="param-output" class="param-input" value="${cfg.maxOutput}" min="256" max="32768" step="256">
+                </div>
+                <div class="param-row param-switch-row">
+                    <div>
+                        <div class="param-label">自动压缩上下文</div>
+                        <div class="param-hint">超出窗口时自动摘要较早对话，保留最近内容</div>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="param-compress" ${cfg.autoCompress ? 'checked' : ''}>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <div class="settings-group">
+            <div class="settings-group-title">系统提示词</div>
+            <div class="param-block">
+                <div class="param-row">
+                    <div>
+                        <div class="param-label">自定义系统提示词</div>
+                        <div class="param-hint">注入到每次对话开头，可定义写作风格与角色（如：你是资深网文编辑…）</div>
+                    </div>
+                </div>
+                <textarea id="param-prompt" class="param-textarea" rows="5" placeholder="例如：你是经验丰富的网络小说编辑，回复用中文，善于调动读者情绪，注重爽点和节奏。">${escapeHtml(cfg.systemPrompt)}</textarea>
+            </div>
+        </div>
+
+        <button class="btn-primary param-save-btn" onclick="saveParamConfig()">保存参数</button>`;
+}
+
+function updateTempLabel(v) {
+    const el = document.getElementById('param-temp-val');
+    if (el) el.textContent = parseFloat(v).toFixed(1);
+}
+
+async function saveParamConfig() {
+    const cfg = {
+        temperature: parseFloat(document.getElementById('param-temp').value) || 0.7,
+        contextWindow: parseInt(document.getElementById('param-context').value, 10) || 8192,
+        maxOutput: parseInt(document.getElementById('param-output').value, 10) || 4000,
+        autoCompress: document.getElementById('param-compress').checked,
+        systemPrompt: (document.getElementById('param-prompt').value || '').trim()
+    };
+    await settings.setRunConfig(cfg);
+    ui.showToast('参数已保存');
+}
+
+// ===== Data Manage Page (v2.3.0) =====
+async function renderDataManage(container) {
+    ui.setPageTitle('数据备份与恢复');
+    ui.setHeaderActions(`<button class="header-btn" onclick="navigateTo('settings')">返回</button>`);
+
+    // 统计各 store 数据量
+    const stats = {};
+    let totalRecords = 0;
+    let totalBytes = 0;
+    for (const store of db.STORES) {
+        try {
+            const records = await db.getAll(store);
+            stats[store] = records.length;
+            totalRecords += records.length;
+            totalBytes += JSON.stringify(records).length;
+        } catch (e) {
+            stats[store] = 0;
+        }
+    }
+
+    const fmt = (n) => n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + ' MB'
+        : n >= 1024 ? (n / 1024).toFixed(1) + ' KB'
+        : n + ' B';
+
+    container.innerHTML = `
+        <div class="data-stats">
+            <div class="data-stat-card">
+                <div class="data-stat-num">${stats.novels || 0}</div>
+                <div class="data-stat-label">作品</div>
+            </div>
+            <div class="data-stat-card">
+                <div class="data-stat-num">${stats.chapters || 0}</div>
+                <div class="data-stat-label">章节</div>
+            </div>
+            <div class="data-stat-card">
+                <div class="data-stat-num">${(stats.skills || 0) + (stats.skillStore || 0)}</div>
+                <div class="data-stat-label">Skill</div>
+            </div>
+            <div class="data-stat-card">
+                <div class="data-stat-num">${stats.memos || 0}</div>
+                <div class="data-stat-label">备忘录</div>
+            </div>
+        </div>
+        <div class="data-summary">共 ${totalRecords} 条记录 · 约 ${fmt(totalBytes)}</div>
+
+        <div class="settings-group">
+            <div class="settings-group-title">备份</div>
+            <div class="param-block">
+                <div class="param-row">
+                    <div>
+                        <div class="param-label">导出全部数据</div>
+                        <div class="param-hint">将作品、章节、技能、备忘录等保存为一个 JSON 文件</div>
+                    </div>
+                </div>
+                <button class="btn-primary params-btn" id="btn-export" onclick="exportAllData()">导出数据</button>
+            </div>
+        </div>
+
+        <div class="settings-group">
+            <div class="settings-group-title">恢复</div>
+            <div class="param-block">
+                <div class="param-row">
+                    <div>
+                        <div class="param-label">导入备份文件</div>
+                        <div class="param-hint">从 JSON 备份恢复。⚠️ 将覆盖当前全部本地数据</div>
+                    </div>
+                </div>
+                <button class="btn-primary params-btn params-btn-danger" id="btn-import" onclick="document.getElementById('import-file').click()">选择备份文件导入</button>
+                <input type="file" id="import-file" accept=".json,application/json" style="display:none" onchange="handleImportFile(this)">
+            </div>
+        </div>`;
+}
+
+async function exportAllData() {
+    try {
+        const btn = document.getElementById('btn-export');
+        if (btn) { btn.disabled = true; btn.textContent = '导出中…'; }
+        const data = await db.exportAll();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const d = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        const filename = `openwrite-backup-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+        ui.showToast('备份文件已导出');
+    } catch (e) {
+        ui.showToast('导出失败: ' + e.message);
+    } finally {
+        const btn = document.getElementById('btn-export');
+        if (btn) { btn.disabled = false; btn.textContent = '导出数据'; }
+    }
+}
+
+function handleImportFile(input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (!confirm('导入将覆盖当前全部本地数据，确定继续吗？')) {
+        input.value = '';
+        return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => {
+        try {
+            const data = JSON.parse(reader.result);
+            if (!data || typeof data !== 'object' || !data.stores) {
+                throw new Error('不是有效的 OpenWrite 备份文件');
+            }
+            ui.showToast('正在恢复数据…');
+            await db.importAll(data);
+            ui.showToast('✅ 数据恢复成功');
+            input.value = '';
+            navigateTo('dataManage');
+        } catch (e) {
+            ui.showToast('导入失败: ' + e.message);
+            input.value = '';
+        }
+    };
+    reader.onerror = () => { ui.showToast('读取文件失败'); input.value = ''; };
+    reader.readAsText(file);
 }
 
 // ===== About Page =====
@@ -958,13 +1323,221 @@ function showCreateNovelModal() {
                 <option value="历史">历史</option><option value="悬疑">悬疑</option>
                 <option value="言情">言情</option><option value="其他">其他</option>
             </select></div>
-            <button class="btn btn-primary btn-block" onclick="createNovel()">创建</button>
+            <button class="btn btn-primary btn-block" onclick="createNovel()">手动创建</button>
+            <button class="btn btn-secondary btn-block" onclick="createNovelWithAI()">AI 创建</button>
         </div>`);
     modal.show();
 }
 
-async function createNovel() {
+async function createNovelWithAI() {
     const title = document.getElementById('new-novel-title').value.trim();
+    const desc = document.getElementById('new-novel-desc').value.trim();
+    const genre = document.getElementById('new-novel-genre').value;
+
+    if (!title) { ui.showToast('请输入作品名称'); return; }
+
+    closeModal();
+    
+    // Show agent workflow UI
+    const workflowHtml = `
+        <div id="agent-workflow" style="padding: 16px;">
+            <div style="text-align: center; margin-bottom: 20px;">
+                <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">AI 正在创建小说</div>
+                <div style="font-size: 14px; color: var(--text-secondary);">《${escapeHtml(title)}》</div>
+            </div>
+            <div class="agent-steps" id="agent-steps"></div>
+            <div id="agent-result" style="margin-top: 16px;"></div>
+        </div>
+    `;
+    
+    const container = document.getElementById('chat-view') || document.querySelector('.page-view.active');
+    if (container) {
+        container.innerHTML = workflowHtml;
+    }
+
+    const stepsEl = document.getElementById('agent-steps');
+    const steps = [
+        { id: 'find-skills', label: '查找相关技能', icon: '🧩' },
+        { id: 'list-outline', label: '生成故事大纲', icon: '📋' },
+        { id: 'read-templates', label: '读取风格模板', icon: '📄' },
+        { id: 'generate-content', label: '生成章节内容', icon: '✍️' }
+    ];
+
+    function updateStep(index, status, detail) {
+        const html = steps.map((s, i) => {
+            const state = i < index ? 'completed' : i === index ? status : 'pending';
+            const icon = state === 'completed' ? '✅' : state === 'in-progress' ? '<span class="spinner" style="width:16px;height:16px;border-width:2px;"></span>' : '⏳';
+            const color = state === 'completed' ? 'var(--success)' : state === 'in-progress' ? 'var(--primary)' : 'var(--text-tertiary)';
+            return `
+                <div style="display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 10px; background: ${state === 'in-progress' ? 'rgba(99,102,241,0.05)' : 'var(--bg)'}; margin-bottom: 8px;">
+                    <div style="font-size: 20px;">${s.icon}</div>
+                    <div style="flex: 1;">
+                        <div style="font-size: 14px; font-weight: 500; color: ${color};">${s.label}</div>
+                        ${detail && i === index ? `<div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px;">${detail}</div>` : ''}
+                    </div>
+                    <div style="flex-shrink: 0;">${icon}</div>
+                </div>
+            `;
+        }).join('');
+        if (stepsEl) stepsEl.innerHTML = html;
+    }
+
+    try {
+        // Step 1: Find relevant skills
+        updateStep(0, 'in-progress', '搜索相关写作技能...');
+        await new Promise(r => setTimeout(r, 800));
+        const activeSkills = await skillManager.listActive();
+        const relevantSkills = activeSkills.filter(s => 
+            (genre && s.category?.includes(genre)) || 
+            s.content?.includes('大纲') || 
+            s.content?.includes('写作')
+        );
+        updateStep(0, 'completed', `找到 ${relevantSkills.length} 个相关技能`);
+
+        // Step 2: Generate outline
+        updateStep(1, 'in-progress', 'AI 正在构思故事大纲...');
+        await new Promise(r => setTimeout(r, 500));
+        
+        const outlinePrompt = `请为小说《${title}》生成一个完整的故事大纲。
+${desc ? '简介：' + desc : ''}
+${genre ? '类型：' + genre : ''}
+
+要求：
+1. 给出10-15章的章节标题和简要内容
+2. 包含主要人物设定
+3. 标注关键剧情转折点
+
+请以 JSON 格式输出：
+{
+  "title": "作品名称",
+  "outline": [
+    {"chapter": 1, "title": "第一章标题", "summary": "内容概要"}
+  ],
+  "characters": [
+    {"name": "角色名", "role": "主角/配角", "description": "角色描述"}
+  ]
+}`;
+
+        let outlineContent = '';
+        try {
+            outlineContent = await ai.chat([
+                { role: 'system', content: '你是专业的小说大纲规划师，擅长构建完整的故事架构。' },
+                { role: 'user', content: outlinePrompt }
+            ], null, 4000);
+        } catch (e) {
+            outlineContent = '';
+        }
+        
+        // Parse outline
+        let outline = null;
+        try {
+            const jsonMatch = outlineContent.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                outline = JSON.parse(jsonMatch[0]);
+            }
+        } catch (e) {
+            outline = null;
+        }
+        
+        updateStep(1, 'completed', outline ? `大纲生成完成，共 ${outline.outline?.length || 0} 章` : '大纲生成完成');
+
+        // Step 3: Read templates
+        updateStep(2, 'in-progress', '查找风格模板...');
+        await new Promise(r => setTimeout(r, 600));
+        const templates = await distillManager.listTemplates();
+        const selectedTemplate = templates.length > 0 ? templates[0] : null;
+        updateStep(2, 'completed', selectedTemplate ? `已加载风格模板：${selectedTemplate.name}` : '使用默认风格');
+
+        // Step 4: Generate content
+        updateStep(3, 'in-progress', 'AI 正在生成第一章内容...');
+        await new Promise(r => setTimeout(r, 500));
+        
+        const novel = await novelManager.create(title, desc, genre);
+        
+        // Save outline as data
+        if (outline) {
+            novel.outline = outline.outline || [];
+            novel.characters = outline.characters || [];
+            await novelManager.update(novel);
+        }
+
+        // Generate first chapter
+        const writePrompt = `请根据以下信息生成小说《${title}》第一章的完整内容。
+
+${desc ? '作品简介：' + desc : ''}
+${genre ? '类型：' + genre : ''}
+${outline && outline.outline ? '故事大纲：\n' + outline.outline.slice(0, 3).map(o => `第${o.chapter}章 ${o.title}：${o.summary}`).join('\n') : ''}
+${selectedTemplate ? '写作风格要求：\n' + selectedTemplate.content?.substring(0, 500) : ''}
+
+要求：
+1. 生成完整的第一章正文（2000-3000字）
+2. 包含章节标题
+3. 语言流畅，情节吸引人
+4. 符合${genre || '小说'}类型的风格特点
+
+请直接输出章节标题和正文内容。`;
+
+        let chapterContent = '';
+        let chapterTitle = '第一章';
+        
+        try {
+            const fullContent = await ai.chat([
+                { role: 'system', content: `你是专业的小说作家，擅长${genre || '各类'}小说创作。` },
+                { role: 'user', content: writePrompt }
+            ], null, 4000);
+            
+            // Extract title from content
+            const titleMatch = fullContent.match(/^(第[一二三四五六七八九十\d]+章[：:]|第[一二三四五六七八九十\d]+章\s+)(.+)$/m);
+            if (titleMatch) {
+                chapterTitle = titleMatch[2].trim() || '第一章';
+                chapterContent = fullContent.replace(titleMatch[0], '').trim();
+            } else {
+                chapterContent = fullContent;
+            }
+        } catch (e) {
+            chapterContent = 'AI 生成内容时出现错误，请重试或手动编写。';
+        }
+
+        // Save chapter
+        await novelManager.saveChapter(novel.id, 1, chapterTitle, chapterContent);
+        
+        updateStep(3, 'completed', '第一章生成完成！');
+
+        // Show result
+        const resultEl = document.getElementById('agent-result');
+        if (resultEl) {
+            resultEl.innerHTML = `
+                <div style="background: var(--surface); border-radius: 12px; padding: 16px; margin-top: 16px;">
+                    <div style="font-size: 16px; font-weight: 600; margin-bottom: 8px;">✅ 小说创建成功</div>
+                    <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 12px;">
+                        《${escapeHtml(title)}》第一章已生成完毕
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-primary" style="flex: 1;" onclick="navigateTo('chapterEdit', { novelId: '${novel.id}', chapterNum: 1 })">查看章节</button>
+                        <button class="btn btn-secondary" style="flex: 1;" onclick="navigateTo('novelDetail', { novelId: '${novel.id}' })">查看作品</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        ui.showToast('AI 已创建小说并生成第一章！');
+
+    } catch (err) {
+        console.error('AI 创建失败:', err);
+        ui.showToast('AI 创建失败: ' + err.message);
+        
+        // Show error state
+        if (stepsEl) {
+            stepsEl.innerHTML += `
+                <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; padding: 12px; margin-top: 12px;">
+                    <div style="color: #b91c1c; font-size: 14px;">❌ 创建失败：${escapeHtml(err.message)}</div>
+                </div>
+            `;
+        }
+    }
+}
+
+async function createNovel() {
     const desc = document.getElementById('new-novel-desc').value.trim();
     const genre = document.getElementById('new-novel-genre').value;
 
@@ -1928,4 +2501,49 @@ async function saveMemo() {
 function viewMemo(id) {
     // 可以查看/编辑备忘录详情
     ui.showToast('备忘录查看功能开发中');
+}
+
+// ===== Novel Tree Browser Helpers =====
+
+function toggleTreeFolder(folderEl) {
+    folderEl.classList.toggle('collapsed');
+}
+
+async function viewOutlineItem(novelId, index) {
+    const novel = await novelManager.get(novelId);
+    if (!novel || !novel.outline || !novel.outline[index]) {
+        ui.showToast('大纲条目不存在');
+        return;
+    }
+    
+    const item = novel.outline[index];
+    const modal = createModal(`第${item.chapter}章 ${item.title}`, `
+        <div style="font-size: 14px; line-height: 1.8; color: var(--text);">
+            <div style="margin-bottom: 12px; padding: 12px; background: var(--bg); border-radius: 8px;">
+                <div style="font-weight: 600; margin-bottom: 4px;">章节概要</div>
+                <div style="color: var(--text-secondary);">${escapeHtml(item.summary || '暂无概要')}</div>
+            </div>
+            <div style="font-size: 12px; color: var(--text-tertiary);">章节编号: ${item.chapter}</div>
+        </div>
+    `);
+    modal.show();
+}
+
+async function viewCharacter(novelId, index) {
+    const novel = await novelManager.get(novelId);
+    if (!novel || !novel.characters || !novel.characters[index]) {
+        ui.showToast('角色资料不存在');
+        return;
+    }
+    
+    const char = novel.characters[index];
+    const modal = createModal(char.name, `
+        <div style="font-size: 14px; line-height: 1.8; color: var(--text);">
+            <div style="margin-bottom: 12px; padding: 12px; background: var(--bg); border-radius: 8px;">
+                <div style="font-weight: 600; margin-bottom: 4px;">${char.role || '角色'}</div>
+                <div style="color: var(--text-secondary);">${escapeHtml(char.description || '暂无描述')}</div>
+            </div>
+        </div>
+    `);
+    modal.show();
 }
