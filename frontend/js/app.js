@@ -6,10 +6,10 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.5.0',
+    VERSION: '2.6.0',
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
-    DB_VERSION: 6
+    DB_VERSION: 7
 };
 
 // ===== IndexedDB Store =====
@@ -3779,4 +3779,332 @@ ${text.substring(0, 800)}
         }
     }
     return conflicts;
+}
+
+// ===== Foreshadowing DAG (v2.6.0) =====
+async function renderForeshadowing(novelId) {
+    const novel = await novelManager.getNovel(novelId);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    const items = await novelManager.listForeshadowing(novelId);
+    const totalChapters = novel.chapters || 1;
+    ui.setPageTitle(`🔍 伏笔追踪 · ${escapeHtml(novel.title)}`);
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
+        <button class="header-btn" onclick="aiDetectForeshadowing('${novelId}')">AI识别</button>
+        <button class="header-btn" onclick="navigateTo('foreshadowingEdit', { novelId: '${novelId}' })">+ 新建</button>
+    `);
+    let currentFilter = 'all';
+    const filterTabs = (filter) => {
+        currentFilter = filter;
+        const filtered = filter === 'all' ? items : items.filter(i => i.status === filter);
+        renderForeshadowingList(filtered, totalChapters, novelId);
+    };
+    const renderForeshadowingList = (list, total, nid) => {
+        const container = document.getElementById('foreshadowing-list');
+        if (!container) return;
+        if (list.length === 0) {
+            container.innerHTML = `<div class="empty-state"><div class="empty-icon">🔍</div><div class="empty-title">暂无伏笔</div><div class="empty-desc">点击右上角"+ 新建"或"AI识别"开始追踪</div></div>`;
+            return;
+        }
+        container.innerHTML = list.map(fs => {
+            const progress = total > 0 ? Math.min(100, Math.round(((fs.plantChapter || 1) / total) * 100)) : 0;
+            const isHarvested = fs.status === 'harvested';
+            const isOverdue = !isHarvested && (fs.targetChapter || 1) < total;
+            const impactClass = fs.impact === 'high' ? 'fs-impact-high' : fs.impact === 'low' ? 'fs-impact-low' : 'fs-impact-medium';
+            const impactLabel = fs.impact === 'high' ? '高' : fs.impact === 'low' ? '低' : '中';
+            return `
+            <div class="fs-card ${isHarvested ? 'fs-harvested' : ''}" onclick="navigateTo('foreshadowingEdit', { novelId: '${nid}', foreshadowingId: '${fs.id}' })">
+                <div class="fs-header">
+                    <div class="fs-status-tag ${isHarvested ? 'fs-tag-harvested' : 'fs-tag-planted'}">${isHarvested ? '✅ 已回收' : '🌱 已埋设'}</div>
+                    <div class="fs-impact ${impactClass}">${impactLabel}</div>
+                    ${isOverdue ? '<div class="fs-overdue">⚠️ 已到期</div>' : ''}
+                </div>
+                <div class="fs-desc">${escapeHtml(fs.description)}</div>
+                <div class="fs-chapters">
+                    <span>第${fs.plantChapter || 1}章 埋设</span>
+                    <span class="fs-arrow">→</span>
+                    <span>第${fs.targetChapter || 1}章 回收</span>
+                </div>
+                <div class="fs-progress-bar">
+                    <div class="fs-progress-track">
+                        <div class="fs-progress-fill" style="width: ${isHarvested ? 100 : progress}%"></div>
+                    </div>
+                    <div class="fs-progress-text">${isHarvested ? '已回收' : `进度 ${progress}%`}</div>
+                </div>
+                ${fs.notes ? `<div class="fs-notes">📝 ${escapeHtml(fs.notes)}</div>` : ''}
+                <div class="fs-actions">
+                    <button class="fs-btn" onclick="event.stopPropagation(); viewForeshadowingDAG('${fs.id}', '${nid}')">查看路径</button>
+                    ${!isHarvested ? `<button class="fs-btn fs-btn-primary" onclick="event.stopPropagation(); harvestForeshadowing('${fs.id}', '${nid}')">标记回收</button>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+    };
+    const content = document.getElementById('view-container');
+    content.innerHTML = `
+        <div style="padding: 12px 16px;">
+            <div class="fs-filter-row">
+                <button class="fs-filter-btn active" data-filter="all">全部</button>
+                <button class="fs-filter-btn" data-filter="planted">已埋设</button>
+                <button class="fs-filter-btn" data-filter="harvested">已回收</button>
+            </div>
+            <div id="foreshadowing-list"></div>
+        </div>`;
+    content.querySelector('.fs-filter-row').addEventListener('click', (e) => {
+        if (e.target.classList.contains('fs-filter-btn')) {
+            content.querySelectorAll('.fs-filter-btn').forEach(b => b.classList.remove('active'));
+            e.target.classList.add('active');
+            const f = e.target.dataset.filter;
+            filterTabs(f);
+        }
+    });
+    renderForeshadowingList(items, totalChapters, novelId);
+}
+
+async function renderForeshadowingEdit(novelId, foreshadowingId) {
+    const novel = await novelManager.getNovel(novelId);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    const fs = foreshadowingId ? await novelManager.getForeshadowing(foreshadowingId) : null;
+    const isNew = !fs;
+    const maxChapter = Math.max(1, novel.chapters || 1);
+    ui.setPageTitle(isNew ? '新建伏笔' : '编辑伏笔');
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('foreshadowing', { novelId: '${novelId}' })">返回</button>
+        ${!isNew ? `<button class="header-btn" onclick="deleteForeshadowing('${foreshadowingId}', '${novelId}')">删除</button>` : ''}
+        <button class="header-btn" onclick="saveForeshadowing('${novelId}', '${foreshadowingId || ''}')">保存</button>
+    `);
+    const container = document.getElementById('view-container');
+    container.innerHTML = `
+        <div style="padding: 12px 16px; display:flex; flex-direction:column; gap: 14px;">
+            <div>
+                <label class="form-label">伏笔描述 *</label>
+                <textarea class="form-textarea" id="fs-description" rows="3" placeholder="如：主角在旧货市场买到一枚刻有奇怪符号的铜币">${escapeHtml(fs?.description || '')}</textarea>
+            </div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div>
+                    <label class="form-label">埋设章节</label>
+                    <input type="number" class="form-input" id="fs-plant" value="${fs?.plantChapter || 1}" min="1" max="${maxChapter}">
+                </div>
+                <div>
+                    <label class="form-label">目标回收章节</label>
+                    <input type="number" class="form-input" id="fs-target" value="${fs?.targetChapter || maxChapter}" min="1" max="${maxChapter + 50}">
+                </div>
+            </div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div>
+                    <label class="form-label">影响等级</label>
+                    <select class="form-select" id="fs-impact">
+                        <option value="low" ${fs?.impact === 'low' ? 'selected' : ''}>🟢 低 - 细节铺垫</option>
+                        <option value="medium" ${fs?.impact === 'medium' || !fs?.impact ? 'selected' : ''}>🟡 中 - 情节转折</option>
+                        <option value="high" ${fs?.impact === 'high' ? 'selected' : ''}>🔴 高 - 核心剧透</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label">当前状态</label>
+                    <select class="form-select" id="fs-status">
+                        <option value="planted" ${fs?.status === 'planted' || !fs?.status ? 'selected' : ''}>🌱 已埋设</option>
+                        <option value="harvested" ${fs?.status === 'harvested' ? 'selected' : ''}>✅ 已回收</option>
+                    </select>
+                </div>
+            </div>
+            <div>
+                <label class="form-label">备注 / 回收方式</label>
+                <textarea class="form-textarea" id="fs-notes" rows="3" placeholder="如：回收方式——铜币在第十章被反派认出是开启遗迹的钥匙，引发争夺战">${escapeHtml(fs?.notes || '')}</textarea>
+            </div>
+            ${!isNew ? `
+            <div class="fs-meta">
+                创建于 ${formatDate(fs.created)} · 更新于 ${formatDate(fs.updated)}
+            </div>` : ''}
+        </div>`;
+}
+
+async function saveForeshadowing(novelId, id) {
+    const description = document.getElementById('fs-description').value.trim();
+    if (!description) { ui.showToast('请输入伏笔描述'); return; }
+    const plantChapter = parseInt(document.getElementById('fs-plant').value) || 1;
+    const targetChapter = parseInt(document.getElementById('fs-target').value) || 1;
+    const data = {
+        description,
+        plantChapter: Math.max(1, plantChapter),
+        targetChapter: Math.max(1, targetChapter),
+        impact: document.getElementById('fs-impact').value,
+        status: document.getElementById('fs-status').value,
+        notes: document.getElementById('fs-notes').value.trim()
+    };
+    try {
+        if (id) {
+            await novelManager.updateForeshadowing(id, data);
+            ui.showToast('伏笔已更新');
+        } else {
+            await novelManager.createForeshadowing(novelId, data);
+            ui.showToast('伏笔已创建');
+        }
+        navigateTo('foreshadowing', { novelId });
+    } catch (e) {
+        ui.showToast('保存失败: ' + e.message);
+    }
+}
+
+async function deleteForeshadowing(id, novelId) {
+    if (!confirm('确定删除此伏笔吗？相关追踪记录将一并移除。')) return;
+    try {
+        await novelManager.deleteForeshadowing(id);
+        ui.showToast('已删除');
+        navigateTo('foreshadowing', { novelId });
+    } catch (e) {
+        ui.showToast('删除失败: ' + e.message);
+    }
+}
+
+async function harvestForeshadowing(id, novelId) {
+    try {
+        await novelManager.updateForeshadowing(id, { status: 'harvested' });
+        ui.showToast('已标记为回收');
+        renderForeshadowing(novelId);
+    } catch (e) {
+        ui.showToast('操作失败: ' + e.message);
+    }
+}
+
+async function viewForeshadowingDAG(foreshadowingId, novelId) {
+    const fs = await novelManager.getForeshadowing(foreshadowingId);
+    if (!fs) { ui.showToast('伏笔不存在'); return; }
+    const novel = await novelManager.getNovel(novelId);
+    const totalChapters = Math.max(1, novel?.chapters || 1);
+    const allFs = await novelManager.listForeshadowing(novelId);
+    const related = allFs.filter(f => f.id !== fs.id && Math.abs((f.plantChapter || 1) - (fs.targetChapter || 1)) <= 2);
+    const plantPct = Math.round(((fs.plantChapter || 1) / totalChapters) * 100);
+    const targetPct = Math.round(((fs.targetChapter || 1) / totalChapters) * 100);
+    const progress = fs.status === 'harvested' ? 100 : Math.max(0, Math.min(100, Math.round(((Math.min(totalChapters, novel?.currentChapter || 1) - (fs.plantChapter || 1)) / Math.max(1, (fs.targetChapter || 1) - (fs.plantChapter || 1))) * 100)));
+    const isOverdue = fs.status !== 'harvested' && (fs.targetChapter || 1) < (novel?.currentChapter || 1);
+    const dagHtml = `
+        <div class="fs-dag-container">
+            <div class="fs-dag-title">${escapeHtml(fs.description)}</div>
+            <div class="fs-dag-path">
+                <div class="fs-dag-node">
+                    <div class="fs-dag-node-label">埋设</div>
+                    <div class="fs-dag-node-chapter">第${fs.plantChapter || 1}章</div>
+                    <div class="fs-dag-node-pct">${plantPct}%</div>
+                </div>
+                <div class="fs-dag-edge">
+                    <div class="fs-dag-arrow">→</div>
+                    <div class="fs-dag-progress">${progress}%</div>
+                </div>
+                <div class="fs-dag-node ${fs.status === 'harvested' ? 'fs-dag-done' : isOverdue ? 'fs-dag-overdue' : ''}">
+                    <div class="fs-dag-node-label">${fs.status === 'harvested' ? '✅ 已回收' : isOverdue ? '⚠️ 待回收' : '待回收'}</div>
+                    <div class="fs-dag-node-chapter">第${fs.targetChapter || 1}章</div>
+                    <div class="fs-dag-node-pct">${targetPct}%</div>
+                </div>
+            </div>
+            ${isOverdue ? `<div class="fs-dag-alert">⚠️ 当前已写到第${novel?.currentChapter || 1}章，此伏笔已逾期 ${(novel?.currentChapter || 1) - (fs.targetChapter || 1)} 章未回收</div>` : ''}
+            <div class="fs-dag-progress-track">
+                <div class="fs-dag-progress-fill" style="width: ${progress}%"></div>
+            </div>
+            ${related.length > 0 ? `
+            <div class="fs-dag-related">
+                <div class="fs-dag-related-title">关联伏笔</div>
+                ${related.map(r => `
+                <div class="fs-dag-related-item" onclick="document.querySelector('.modal-overlay').remove(); viewForeshadowingDAG('${r.id}', '${novelId}')">
+                    <span class="fs-dag-related-status ${r.status === 'harvested' ? 'done' : 'pending'}">${r.status === 'harvested' ? '✅' : '🌱'}</span>
+                    <span class="fs-dag-related-desc">${escapeHtml(r.description)}</span>
+                    <span class="fs-dag-related-ch">${r.plantChapter || 1}→${r.targetChapter || 1}</span>
+                </div>`).join('')}
+            </div>` : ''}
+        </div>`;
+    createModal('伏笔路径图', dagHtml);
+}
+
+async function aiDetectForeshadowing(novelId) {
+    const novel = await novelManager.getNovel(novelId);
+    if (!novel) { ui.showToast('作品不存在'); return; }
+    const chapters = await novelManager.listChapters(novelId);
+    if (chapters.length === 0) { ui.showToast('请先创建章节'); return; }
+    const recentChapters = chapters.slice(-5);
+    const combinedText = recentChapters.map(c => c.title + '\n' + (c.content || '')).join('\n\n').substring(0, 3000);
+    ui.showLoading(document.getElementById('view-container'));
+    try {
+        const prompt = `分析以下小说章节内容，识别其中可能埋设的伏笔（即后文需要回收的暗示、线索或铺垫）。\n\n要求：\n1. 只返回 JSON 数组格式，不要其他文字\n2. 每个伏笔包含：description（描述）, plantChapter（埋设章节号）, targetChapter（预计回收章节号，估算值）, impact（影响等级：low/medium/high）, notes（回收方式建议）\n3. 最多返回 5 个最可能的伏笔\n4. 如果内容中没有明显伏笔，返回空数组 []\n\n章节内容：\n${combinedText.substring(0, 2500)}`;
+        const result = await ai.chat([
+            { role: 'system', content: '你是专业的小说结构分析师，擅长识别伏笔和铺垫。只输出纯JSON数组，不要markdown代码块。' },
+            { role: 'user', content: prompt }
+        ], null, 1200);
+        let detected = [];
+        try {
+            const cleaned = result.replace(/```json?\s*/g, '').replace(/```\s*/g, '').trim();
+            detected = JSON.parse(cleaned);
+            if (!Array.isArray(detected)) detected = [];
+        } catch (e) {
+            const match = result.match(/\[[\s\S]*\]/);
+            if (match) {
+                try { detected = JSON.parse(match[0]); } catch (_) {}
+            }
+        }
+        if (detected.length === 0) {
+            ui.showToast('未检测到明显伏笔，请手动添加');
+            renderForeshadowing(novelId);
+            return;
+        }
+        const modalContent = `
+            <div class="fs-detect-container">
+                <div class="fs-detect-title">AI识别到 ${detected.length} 个潜在伏笔</div>
+                ${detected.map((item, idx) => `
+                <div class="fs-detect-item" id="fs-detect-${idx}">
+                    <div class="fs-detect-desc">${escapeHtml(item.description || '')}</div>
+                    <div class="fs-detect-meta">
+                        <span>埋设：第${item.plantChapter || 1}章</span>
+                        <span>回收：第${item.targetChapter || 1}章</span>
+                        <span class="fs-detect-impact ${item.impact === 'high' ? 'high' : item.impact === 'low' ? 'low' : 'medium'}">${item.impact === 'high' ? '高' : item.impact === 'low' ? '低' : '中'}</span>
+                    </div>
+                    ${item.notes ? `<div class="fs-detect-notes">${escapeHtml(item.notes)}</div>` : ''}
+                    <button class="fs-detect-add-btn" onclick="addDetectedForeshadowing('${novelId}', ${idx})">➕ 添加此伏笔</button>
+                </div>
+                `).join('')}
+                <button class="fs-detect-add-all" onclick="addAllDetectedForeshadowing('${novelId}')">一键添加全部</button>
+            </div>`;
+        window._detectedForeshadowing = detected;
+        window._detectedNovelId = novelId;
+        createModal('AI 伏笔识别', modalContent);
+    } catch (e) {
+        ui.showToast('AI识别失败: ' + e.message);
+        renderForeshadowing(novelId);
+    }
+}
+
+async function addDetectedForeshadowing(novelId, idx) {
+    const detected = window._detectedForeshadowing;
+    if (!detected || !detected[idx]) return;
+    const item = detected[idx];
+    try {
+        await novelManager.createForeshadowing(novelId, {
+            description: item.description || '',
+            plantChapter: parseInt(item.plantChapter) || 1,
+            targetChapter: parseInt(item.targetChapter) || 1,
+            impact: ['low', 'medium', 'high'].includes(item.impact) ? item.impact : 'medium',
+            notes: item.notes || ''
+        });
+        ui.showToast('伏笔已添加');
+        document.getElementById(`fs-detect-${idx}`)?.classList.add('fs-detect-added');
+    } catch (e) {
+        ui.showToast('添加失败: ' + e.message);
+    }
+}
+
+async function addAllDetectedForeshadowing(novelId) {
+    const detected = window._detectedForeshadowing;
+    if (!detected || detected.length === 0) return;
+    let added = 0;
+    for (const item of detected) {
+        try {
+            await novelManager.createForeshadowing(novelId, {
+                description: item.description || '',
+                plantChapter: parseInt(item.plantChapter) || 1,
+                targetChapter: parseInt(item.targetChapter) || 1,
+                impact: ['low', 'medium', 'high'].includes(item.impact) ? item.impact : 'medium',
+                notes: item.notes || ''
+            });
+            added++;
+        } catch (_) {}
+    }
+    ui.showToast(`已添加 ${added} 个伏笔`);
+    closeModal();
+    renderForeshadowing(novelId);
 }
