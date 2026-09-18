@@ -760,16 +760,16 @@ function renderChat(container) {
 
             <!-- 快捷工具胶囊行 -->
             <div class="chat-tool-row">
-                <button class="chat-tool-pill" onclick="showMemo()"><span class="tool-pill-icon">📝</span>备忘录</button>
-                <button class="chat-tool-pill" onclick="showNameGenerator()"><span class="tool-pill-icon">T</span>起名</button>
-                <button class="chat-tool-pill primary" onclick="navigateTo('distill')"><span class="tool-pill-icon">✨</span>蒸馏</button>
-                <button class="chat-tool-pill" onclick="showDeconstruct()"><span class="tool-pill-icon">📖</span>拆解</button>
-                <button class="chat-tool-pill" onclick="showRank()"><span class="tool-pill-icon">📊</span>扫榜</button>
+                <button class="chat-tool-pill" onclick="showMemo()"><span class="tool-pill-icon"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span>备忘录</button>
+                <button class="chat-tool-pill" onclick="showNameGenerator()"><span class="tool-pill-icon" style="font-size:13px;font-weight:600;">T</span>起名</button>
+                <button class="chat-tool-pill primary" onclick="navigateTo('distill')"><span class="tool-pill-icon"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 3l9 16H3L12 3z"/><path d="M12 12v4"/></svg></span>蒸馏</button>
+                <button class="chat-tool-pill" onclick="showDeconstruct()"><span class="tool-pill-icon"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span>拆解</button>
+                <button class="chat-tool-pill" onclick="showRank()"><span class="tool-pill-icon"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></span>扫榜</button>
             </div>
 
             <!-- 中央 Logo 区域 -->
             <div class="chat-hero">
-                <div class="chat-hero-logo">✨</div>
+                <div class="chat-hero-logo"><svg viewBox="0 0 24 24" width="48" height="48" stroke="var(--primary)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg></div>
                 <div class="chat-hero-title">OpenWrite</div>
                 <div class="chat-hero-subtitle">你的 AI 小说写作助手</div>
             </div>
@@ -777,7 +777,7 @@ function renderChat(container) {
             <!-- 操作卡片 -->
             <div class="chat-action-list">
                 <div class="chat-action-card" onclick="createNovelWithAI()">
-                    <div class="chat-action-icon" style="background: linear-gradient(135deg, #ede9fe, #ddd6fe);">📚</div>
+                    <div class="chat-action-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="var(--primary)" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></div>
                     <div class="chat-action-body">
                         <div class="chat-action-title">新书启航</div>
                         <div class="chat-action-desc">AI 对话式创建，只需输入类型和书名</div>
@@ -785,7 +785,7 @@ function renderChat(container) {
                     <span class="chat-action-arrow">›</span>
                 </div>
                 <div class="chat-action-card" onclick="continueWriting()">
-                    <div class="chat-action-icon" style="background: linear-gradient(135deg, #fef3c7, #fde68a);">✍️</div>
+                    <div class="chat-action-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="#f59e0b" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg></div>
                     <div class="chat-action-body">
                         <div class="chat-action-title">继续写作</div>
                         <div class="chat-action-desc">继续上一次的对话</div>
@@ -793,7 +793,7 @@ function renderChat(container) {
                     <span class="chat-action-arrow">›</span>
                 </div>
                 <div class="chat-action-card" onclick="showTutorial()">
-                    <div class="chat-action-icon" style="background: linear-gradient(135deg, #fce7f3, #fbcfe8);">📖</div>
+                    <div class="chat-action-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="#ec4899" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></div>
                     <div class="chat-action-body">
                         <div class="chat-action-title">使用教程</div>
                         <div class="chat-action-desc">查看使用手册</div>
@@ -1219,7 +1219,7 @@ async function renderSettings(container) {
             <div class="settings-group-title">AI 提供商</div>
                 <div class="settings-item" onclick="showModelConfigModal()">
                 <div class="settings-item-left">
-                    <div class="settings-icon">🤖</div>
+                    <div class="settings-icon"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M6 8h.01M10 8h.01M14 8h.01M18 8h.01"/></svg></div>
                     <div>
                         <div class="settings-label">模型配置</div>
                         <div class="settings-value" id="model-config-display">加载中…</div>
@@ -1229,7 +1229,7 @@ async function renderSettings(container) {
             </div>
             <div class="settings-item" onclick="navigateTo('skillCenter')">
                 <div class="settings-item-left">
-                    <div class="settings-icon">🧩</div>
+                    <div class="settings-icon"><svg viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg></div>
                     <div>
                         <div class="settings-label">Skill 管理</div>
                         <div class="settings-value">浏览、导入与管理写作技能</div>
@@ -1239,7 +1239,7 @@ async function renderSettings(container) {
             </div>
             <div class="settings-item" onclick="navigateTo('skillPlaza')">
                 <div class="settings-item-left">
-                    <div class="settings-icon">🏪</div>
+                    <div class="settings-icon"><svg viewBox="0 0 24 24"><path d="M3 3h18v18H3zM9 9h6v6H9zM3 9h6M15 9h6M3 15h18M9 3v6M15 3v6M9 15v6M15 15v6"/></svg></div>
                     <div>
                         <div class="settings-label">Skill 广场</div>
                         <div class="settings-value">发现与分享写作技能</div>
@@ -1253,7 +1253,7 @@ async function renderSettings(container) {
         <div class="settings-group-title">关于</div>
         <div class="settings-item">
             <div class="settings-item-left">
-                <div class="settings-icon">📦</div>
+                <div class="settings-icon"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16M9 4v16"/></svg></div>
                 <div>
                     <div class="settings-label">版本</div>
                     <div class="settings-value">${CONFIG.VERSION}</div>
@@ -1280,8 +1280,8 @@ async function renderSettings(container) {
             return 'custom';
         };
         const friendlyProvider = detectProvider(config.model);
-        const hasKey = config.apiKey ? ' ✅已配置' : ' ❌未配置';
-        displayEl.textContent = `${friendlyProvider} · ${config.model || '未选'}${hasKey}`;
+        const hasKey = config.apiKey ? '<span class="status-dot ok"></span>已配置' : '<span class="status-dot err"></span>未配置';
+        displayEl.innerHTML = `${friendlyProvider} · ${config.model || '未选'} ${hasKey}`;
     }
 }
 

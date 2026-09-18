@@ -58,6 +58,14 @@ jobs:
       - name: Sync Capacitor
         run: npx cap sync
 
+      - name: Configure signing
+        run: |
+          # 复制固定签名到 android/app/
+          cp keystore/debug.keystore android/app/debug.keystore
+          # 修改 build.gradle 使用固定签名
+          sed -i '/debug {/,/}/s/storeFile.*/storeFile file('\''debug.keystore'\'')/' android/app/build.gradle
+          grep -A4 "signingConfigs" android/app/build.gradle || true
+
       - name: Build Debug APK
         run: |
           cd android

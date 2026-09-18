@@ -296,8 +296,36 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 20px;
     flex-shrink: 0;
+}
+.chat-action-icon svg {
+    width: 24px;
+    height: 24px;
+    stroke-width: 1.8;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.chat-hero-logo {
+    width: 80px;
+    height: 80px;
+    border-radius: 24px;
+    background: rgba(99, 102, 241, 0.1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 16px;
+    flex-shrink: 0;
+}
+.chat-hero-logo svg {
+    width: 48px;
+    height: 48px;
+    stroke: var(--primary);
+    stroke-width: 1.5;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
 }
 
 .chat-action-body {
@@ -815,14 +843,21 @@ html, body {
 .settings-icon {
     width: 40px;
     height: 40px;
-    background: rgba(99, 102, 241, 0.1);
-    border-radius: 10px;
+    background: rgba(99, 102, 241, 0.08);
+    border-radius: 12px;
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--primary);
-    font-size: 18px;
     flex-shrink: 0;
+}
+.settings-icon svg {
+    width: 20px;
+    height: 20px;
+    stroke: var(--primary);
+    stroke-width: 1.8;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
 }
 
 .settings-label {
@@ -4093,3 +4128,57 @@ html, body {
     border-color: var(--primary) !important;
     box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2) !important;
 }
+
+/* ===== SVG Icon System (v2.7.2) ===== */
+.icon-box {
+    width: 40px;
+    height: 40px;
+    background: rgba(99, 102, 241, 0.08);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.icon-box svg {
+    width: 20px;
+    height: 20px;
+    stroke: var(--primary);
+    stroke-width: 1.8;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.icon-box-sm {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+}
+.icon-box-sm svg {
+    width: 16px;
+    height: 16px;
+    stroke-width: 2;
+}
+.icon-box-lg {
+    width: 56px;
+    height: 56px;
+    border-radius: 16px;
+}
+.icon-box-lg svg {
+    width: 28px;
+    height: 28px;
+    stroke-width: 1.6;
+}
+
+/* 状态标记点 */
+.status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 4px;
+}
+.status-dot.ok { background: var(--success); }
+.status-dot.err { background: var(--danger); }
+.status-text-ok { color: var(--success); }
+.status-text-err { color: var(--danger); }
