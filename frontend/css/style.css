@@ -4241,3 +4241,183 @@ html, body {
 .version-title { font-size: 14px; font-weight: 600; margin-top: 2px; }
 .version-preview { font-size: 12px; color: var(--text-tertiary); margin-top: 2px; }
 .version-actions { display: flex; flex-direction: column; gap: 6px; }
+
+/* ===== AI 主写流程（v2.9.0）===== */
+.ai-write-progress {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    padding: 24px;
+}
+.ai-write-progress.active { opacity: 1; }
+.awp-card {
+    background: var(--bg-primary, #fff);
+    border-radius: 14px;
+    padding: 22px 20px;
+    width: 100%;
+    max-width: 320px;
+    text-align: center;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+.awp-title { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
+.awp-count { font-size: 22px; font-weight: 700; color: var(--primary); margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+.awp-hint { font-size: 12px; color: var(--text-tertiary); line-height: 1.6; margin-bottom: 14px; }
+.ai-write-result {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 76px;
+    background: var(--bg-primary, #fff);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+    padding: 12px 14px;
+    z-index: 1900;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    transform: translateY(20px);
+    opacity: 0;
+    transition: all 0.25s ease;
+}
+.ai-write-result.active { transform: translateY(0); opacity: 1; }
+.awr-text { font-size: 13px; font-weight: 600; flex: 1; min-width: 0; }
+.awr-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.awr-close {
+    border: none;
+    background: none;
+    color: var(--text-tertiary);
+    font-size: 14px;
+    cursor: pointer;
+    padding: 4px;
+}
+@media (prefers-color-scheme: dark) {
+    .awp-card, .ai-write-result { background: #1f1f25; }
+}
+
+/* ===== 对话式补设定（v2.9.0）===== */
+.chat-novel-ctx {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    background: var(--bg-secondary, #f6f6f9);
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-secondary);
+    transition: border-color 0.2s ease;
+}
+.chat-novel-ctx.bound {
+    border-style: solid;
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+.cnc-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-tertiary);
+    flex-shrink: 0;
+}
+.cnc-dot.on { background: var(--primary); }
+.cnc-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cnc-arrow { flex-shrink: 0; font-weight: 700; }
+.msg-row { position: relative; }
+.msg-more {
+    position: absolute;
+    right: 4px;
+    bottom: 0;
+    border: none;
+    background: var(--bg-secondary, #f0f0f4);
+    color: var(--text-tertiary);
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1;
+    padding: 4px 7px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+.msg-row:hover .msg-more { opacity: 1; }
+.msg-more.ai-more { position: static; margin-top: 4px; display: block; }
+.setting-cards { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.setting-card {
+    border: 1px solid var(--primary);
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: color-mix(in srgb, var(--primary) 6%, transparent);
+}
+.setting-card-head { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+.setting-card-body { font-size: 13px; line-height: 1.7; color: var(--text-secondary); white-space: pre-wrap; }
+.setting-card-actions { display: flex; gap: 8px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
+.setting-card-hint { font-size: 12px; color: var(--text-tertiary); }
+
+/* ===== 场景卡（v2.9.0）===== */
+.scene-card {
+    margin: 10px 16px 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-primary, #fff);
+}
+.scene-card-filled { border-color: var(--primary); }
+.scene-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+}
+.scene-card-toggle { color: var(--text-tertiary); font-size: 11px; }
+.scene-card-body { padding: 0 12px 12px; }
+.scene-card-hint { font-size: 12px; color: var(--text-tertiary); margin-bottom: 8px; }
+.scene-input { margin-bottom: 8px; font-size: 13px; }
+
+/* ===== 拆书（v2.9.0）===== */
+.deconstruct-result {
+    max-height: 52vh;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.7;
+    padding: 4px 2px;
+}
+.deconstruct-result h2 { font-size: 15px; margin: 14px 0 6px; }
+.deconstruct-result h3 { font-size: 14px; margin: 12px 0 6px; }
+.deconstruct-result h4 { font-size: 13px; margin: 10px 0 4px; }
+.deconstruct-result p { margin: 6px 0; }
+.md-list { margin: 4px 0 8px; }
+.md-li { padding-left: 14px; margin: 2px 0; color: var(--text-secondary); }
+
+/* ===== 读者体检（v2.9.0）===== */
+.audit-scores { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+.audit-dim { text-align: center; padding: 10px 4px; background: var(--bg-secondary, #f6f6f9); border-radius: 10px; }
+.audit-dim-num { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.audit-dim-label { font-size: 12px; font-weight: 600; margin-top: 2px; }
+.audit-dim-desc { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; line-height: 1.4; }
+.audit-verdict { font-size: 13px; line-height: 1.7; padding: 10px 12px; background: color-mix(in srgb, var(--primary) 7%, transparent); border-radius: 8px; margin-bottom: 12px; }
+.audit-section-title { font-size: 13px; font-weight: 700; margin: 12px 0 8px; }
+.audit-empty { font-size: 12px; color: var(--text-tertiary); }
+.audit-debt { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.audit-debt-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
+.audit-debt-type { font-size: 12px; font-weight: 700; color: #ef4444; }
+.audit-debt-detail { font-size: 13px; line-height: 1.6; }
+.audit-debt-sugg { font-size: 12px; color: var(--text-secondary); margin-top: 4px; line-height: 1.6; }
+.audit-highlights { font-size: 13px; line-height: 1.7; }
+.audit-hl { margin: 2px 0; }
+.audit-history { display: flex; flex-direction: column; gap: 4px; }
+.audit-history-item { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary); padding: 6px 8px; background: var(--bg-secondary, #f6f6f9); border-radius: 6px; }
+.audit-history-item.current { border: 1px solid var(--primary); }
+.audit-history-scores { color: var(--text-tertiary); }
