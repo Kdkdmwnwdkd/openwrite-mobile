@@ -4198,3 +4198,46 @@ html, body {
 .ng-meta { font-size: 12px; color: var(--primary); margin-top: 2px; }
 .ng-reason { font-size: 12px; color: var(--text-tertiary); margin-top: 2px; }
 .btn-sm { padding: 6px 12px; font-size: 12px; }
+
+/* ===== AI 草稿候选区 / 章节摘要 / 版本历史（v2.8.0）===== */
+.draft-hint {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    background: var(--bg-secondary, #f6f6f9);
+    padding: 8px 10px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    line-height: 1.6;
+}
+.draft-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+}
+.draft-actions .btn { flex: 1 1 auto; }
+#draft-content, .form-textarea { min-height: 220px; resize: vertical; }
+.chapter-summary-box {
+    margin: 10px 16px 0;
+    padding: 10px 12px;
+    border-left: 3px solid var(--primary);
+    background: var(--bg-secondary, #f6f6f9);
+    border-radius: 6px;
+}
+.chapter-summary-title { font-size: 12px; font-weight: 600; color: var(--primary); margin-bottom: 4px; }
+.chapter-summary-text { font-size: 13px; line-height: 1.7; color: var(--text-secondary); }
+.version-list { max-height: 60vh; overflow-y: auto; }
+.version-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+.version-item:last-child { border-bottom: none; }
+.version-meta { flex: 1; min-width: 0; }
+.version-time { font-size: 12px; color: var(--text-tertiary); }
+.version-title { font-size: 14px; font-weight: 600; margin-top: 2px; }
+.version-preview { font-size: 12px; color: var(--text-tertiary); margin-top: 2px; }
+.version-actions { display: flex; flex-direction: column; gap: 6px; }

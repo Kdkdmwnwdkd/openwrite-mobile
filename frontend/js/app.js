@@ -6,10 +6,10 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.7.1',
+    VERSION: '2.8.0',
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
-    DB_VERSION: 7
+    DB_VERSION: 8
 };
 
 // ===== IndexedDB Store =====
@@ -59,6 +59,11 @@ const db = {
                     chars.createIndex('novelId', 'novelId', { unique: false });
                 }
                 // v6: 世界观设定库
+                // v8: 章节版本历史（支持回滚）
+                if (!db.objectStoreNames.contains('versions')) {
+                    const vs = db.createObjectStore('versions', { keyPath: 'id' });
+                    vs.createIndex('chapterId', 'chapterId', { unique: false });
+                }
                 if (!db.objectStoreNames.contains('worldbuilding')) {
                     const wb = db.createObjectStore('worldbuilding', { keyPath: 'id' });
                     wb.createIndex('novelId', 'novelId', { unique: false });
@@ -115,7 +120,7 @@ const db = {
     },
 
     // ===== 备份/恢复支持 =====
-    STORES: ['novels', 'chapters', 'settings', 'messages', 'skills', 'reviews', 'templates', 'skillStore', 'memos', 'characters', 'worldbuilding'],
+    STORES: ['novels', 'chapters', 'settings', 'messages', 'skills', 'reviews', 'templates', 'skillStore', 'memos', 'characters', 'worldbuilding', 'versions'],
 
     async exportAll() {
         const database = await this.open();
@@ -205,6 +210,140 @@ const settings = {
         await this.set('runConfig', config);
     }
 };
+
+// ===== 分层上下文组装（v2.8.0）=====
+// 长篇小说最大的失败点是「写着写着失忆 / 设定漂移」。这里按同类项目的分层记忆思路组装上下文：
+// 上一章给全文（保证语气与情节衔接），更早的章节只给摘要；设定按关键词命中注入，避免整包塞满上下文。
+const CONTEXT_BUDGET = {
+    recentFull: 2600,     // 上一章正文最大字符
+    olderSummary: 700,    // 无摘要的旧章节回退摘要长度
+    maxChars: 16000       // 总字数预算（超出从尾部截断）
+};
+
+function clipText(text, max) {
+    if (!text) return '';
+    const t = String(text);
+    return t.length > max ? t.slice(0, max) + '…' : t;
+}
+
+function findOutlineChapter(node, chapterNum) {
+    if (!node || !Array.isArray(node.children)) return null;
+    for (const child of node.children) {
+        if (child.chapterNum === chapterNum) return child;
+        const found = findOutlineChapter(child, chapterNum);
+        if (found) return found;
+    }
+    return null;
+}
+
+function formatCharBrief(c) {
+    const parts = [`【${c.name}】`];
+    if (c.personality) parts.push(`性格：${c.personality}`);
+    if (c.appearance) parts.push(`外貌：${c.appearance}`);
+    if (c.catchphrase) parts.push(`口头禅：${c.catchphrase}`);
+    if (c.currentStatus) parts.push(`当前状态：${c.currentStatus}`);
+    if (c.arc) parts.push(`人物弧光：${c.arc}`);
+    return parts.join('\n');
+}
+
+async function buildLayeredContext(novelId, chapterNum, hintText = '') {
+    const parts = [];
+    const stats = {};
+    const novel = await novelManager.get(novelId);
+    if (!novel) return { text: '', stats };
+
+    const allChapters = await novelManager.listChapters(novelId);
+    const sorted = allChapters.slice().sort((a, b) => a.number - b.number);
+    const prev = sorted.filter(c => c.number < chapterNum).slice(-3);
+    const last = prev[prev.length - 1];
+    const older = prev.slice(0, -1);
+
+    // 1) 本章大纲
+    try {
+        const outline = await novelManager.getOutline(novelId);
+        const node = findOutlineChapter(outline, chapterNum);
+        if (node) {
+            parts.push(`【本章大纲】${node.title}：${node.summary || '（暂无细纲）'}`);
+            stats.outline = true;
+        }
+    } catch (e) { /* 大纲缺失时跳过 */ }
+
+    // 2) 本章节拍
+    try {
+        const beats = await novelManager.getBeats(novelId, chapterNum);
+        if (beats.length) {
+            parts.push('【本章节拍（按顺序推进）】\n' + beats.map((b, i) => `${i + 1}. ${b.title || b.content || b}`).join('\n'));
+            stats.beats = beats.length;
+        }
+    } catch (e) { /* 忽略 */ }
+
+    // 3) 伏笔债务：优先提醒已逾期的
+    try {
+        const fsList = await novelManager.listForeshadowing(novelId);
+        const pending = fsList.filter(f => f.status !== 'harvested');
+        if (pending.length) {
+            const scored = pending.map(f => ({
+                ...f,
+                overdue: (f.targetChapter || 1) < chapterNum,
+                dist: Math.abs((f.targetChapter || 1) - chapterNum)
+            })).sort((a, b) => (b.overdue ? 1 : 0) - (a.overdue ? 1 : 0) || a.dist - b.dist).slice(0, 8);
+            parts.push('【待处理伏笔（本章应推进或回收，不要新增无关支线）】\n' + scored.map(f => {
+                const over = (f.targetChapter || 1) < chapterNum ? `，已逾期 ${chapterNum - (f.targetChapter || 1)} 章` : '';
+                return `- 第${f.plantChapter || 1}章埋设：${f.description}（计划第${f.targetChapter || 1}章回收${over}）`;
+            }).join('\n'));
+            stats.foreshadowing = scored.length;
+        }
+    } catch (e) { /* 忽略 */ }
+
+    // 4) 上文：上一章全文（截断）+ 更早章节摘要
+    if (last) {
+        parts.push(`【上一章 第${last.number}章 ${last.title}（衔接基准）】\n${clipText(last.content, CONTEXT_BUDGET.recentFull)}`);
+    }
+    if (older.length) {
+        parts.push('【更早章节回顾】\n' + older.map(c =>
+            `第${c.number}章 ${c.title}：${c.summary || clipText(c.content, CONTEXT_BUDGET.olderSummary)}`
+        ).join('\n'));
+        stats.olderChapters = older.length;
+    }
+
+    // 5) 角色卡：本章关联 > 正文/提示词命中名字 > 兜底前 5
+    const refText = `${hintText || ''}\n${last ? last.content : ''}`.slice(0, 5000);
+    let chars = [];
+    try { chars = await novelManager.listCharacters(novelId); } catch (e) { chars = []; }
+    if (chars.length) {
+        let picked = [];
+        const linked = last && last.characters ? chars.filter(c => last.characters.includes(c.id)) : [];
+        if (linked.length) picked = linked;
+        else {
+            const hit = chars.filter(c => c.name && refText.includes(c.name));
+            picked = hit.length ? hit : chars.slice(0, 5);
+        }
+        if (picked.length) {
+            parts.push('【相关角色卡（必须严格遵照性格、口头禅与当前状态）】\n' + picked.slice(0, 6).map(formatCharBrief).join('\n\n'));
+            stats.characters = picked.length;
+        }
+    }
+
+    // 6) 世界观：关键词命中优先
+    let wbItems = [];
+    try { wbItems = await novelManager.listWorldbuilding(novelId); } catch (e) { wbItems = []; }
+    if (wbItems.length) {
+        const matched = wbItems.filter(w => (w.title && refText.includes(w.title)) ||
+            (Array.isArray(w.keywords) && w.keywords.some(k => k && refText.includes(k))));
+        const chosen = (matched.length ? matched : wbItems.slice(0, 4)).slice(0, 6);
+        parts.push('【相关世界观设定（不得违反）】\n' + chosen.map(w =>
+            `- ${w.title}：${clipText(w.content || w.description || '', 400)}`
+        ).join('\n'));
+        stats.worldbuilding = chosen.length;
+    }
+
+    let text = parts.join('\n\n');
+    if (text.length > CONTEXT_BUDGET.maxChars) {
+        text = text.slice(0, CONTEXT_BUDGET.maxChars) + '\n…（上下文已按预算截断）';
+    }
+    stats.chars = text.length;
+    return { text, stats };
+}
 
 // ===== AI API Client =====
 const ai = {
@@ -327,25 +466,73 @@ ${wbContext ? '\n以下为世界观设定（写作时必须严格遵守规则）
     },
 
     async continueChapter(novelInfo, previousChapters, chapterNum, prompt) {
-        const charContext = await buildCharacterContext(novelInfo.id, chapterNum);
-        const wbContext = await buildWorldbuildingContext(novelInfo.id);
-        const context = previousChapters.map(ch => `第${ch.number}章：${ch.title}\n${ch.content.substring(0, 500)}...`).join('\n\n');
+        // v2.8.0：改用分层上下文（上一章全文 + 旧章摘要 + 按命中注入的设定 + 伏笔债务）
+        // 旧实现把每一章都截取前 500 字拼进去，长篇时既丢失衔接又浪费 token。
+        const layered = await buildLayeredContext(novelInfo.id, chapterNum, prompt || '');
 
         const userPrompt = `请为小说《${novelInfo.title}》生成第${chapterNum}章。
 
-${charContext ? '以下为已设定的角色卡（写作时必须严格遵照角色性格、外貌、口头禅和当前状态）：\n\n' + charContext + '\n\n' : ''}
-${wbContext ? '以下为世界观设定（写作时必须严格遵守规则）：\n\n' + wbContext + '\n\n' : ''}
-前文章节概要：
-${context}
+类型：${novelInfo.genre || '未指定'}
+简介：${novelInfo.description || '暂无'}
 
-写作提示：${prompt || '请延续前文情节，保持故事连贯性'}
+${layered.text ? '===== 故事上下文（必须遵守，不得出现与之一致性冲突的内容）=====\n' + layered.text + '\n===== 上下文结束 =====\n' : ''}
 
-请生成第${chapterNum}章的标题和正文（2000-3000字）。`;
+写作要求：
+${prompt || '延续上一章结尾的情节，保持人物性格与文风一致，推进主线并有记忆点'}
 
-        return await this.chat([
-            { role: 'system', content: `你是小说《${novelInfo.title}》的AI写作助手。保持文风一致，情节连贯。` },
+输出要求：
+1. 第一行输出本章标题，格式固定为「第${chapterNum}章」（可后接标题文字）
+2. 空一行后开始正文，篇幅 2000-3000 字
+3. 不要输出任何与正文无关的说明、注释或写作思路`;
+
+        const messages = [
+            { role: 'system', content: `你是小说《${novelInfo.title}》的AI写作助手。保持文风一致，情节连贯，严格服从已给出的角色设定与世界规则。` },
             { role: 'user', content: userPrompt }
-        ]);
+        ];
+        // 供「查看完整提示词」使用
+        this.lastMessages = messages;
+        this.lastContextStats = layered.stats;
+        return await this.chat(messages);
+    },
+
+    // 生成章节摘要（供后续章节的上下文使用，避免长篇失忆）
+    async summarizeChapter(novelId, chapterNum) {
+        const chapter = await novelManager.getChapter(novelId, chapterNum);
+        if (!chapter || !chapter.content) throw new Error('章节内容为空');
+        const prompt = `请为下面这一章生成结构化摘要，供后续章节写作时快速回顾。
+
+章节：第${chapterNum}章 ${chapter.title || ''}
+正文：
+${chapter.content.substring(0, 8000)}
+
+请严格输出JSON（不要markdown代码块）：
+{"summary": "200字以内的情节摘要", "events": ["关键事件1", "关键事件2"], "stateChanges": ["角色状态变化"], "openEnds": ["本章留下的悬念或未回收线索"]}`;
+
+        const result = await this.chat([
+            { role: 'system', content: '你是小说结构分析师，擅长提炼章节要点，输出严格JSON。' },
+            { role: 'user', content: prompt }
+        ], null, 1200);
+
+        let data = null;
+        try {
+            const cleaned = result.replace(/```json?\s*/g, '').replace(/```\s*/g, '').trim();
+            data = JSON.parse(cleaned);
+        } catch (_) {
+            const m = result.match(/\{[\s\S]*\}/);
+            if (m) { try { data = JSON.parse(m[0]); } catch (_) {} }
+        }
+        if (!data || !data.summary) {
+            // 解析失败时退化为本地截断摘要，保证上下文始终有东西可用
+            data = { summary: chapter.content.substring(0, 200) + '…', events: [], stateChanges: [], openEnds: [] };
+        }
+        const text = [
+            data.summary,
+            (data.events || []).length ? '关键事件：' + data.events.join('；') : '',
+            (data.stateChanges || []).length ? '状态变化：' + data.stateChanges.join('；') : '',
+            (data.openEnds || []).length ? '未回收线索：' + data.openEnds.join('；') : ''
+        ].filter(Boolean).join('\n');
+        await novelManager.saveChapterSummary(novelId, chapterNum, text);
+        return text;
     },
 
     async reviewChapter(chapterContent, novelInfo, chapterNum) {
@@ -384,6 +571,75 @@ const novelManager = {
 
     async get(novelId) {
         return await db.get('novels', novelId);
+    },
+
+    // 兼容部分页面使用的 getNovel 命名
+    async getNovel(novelId) {
+        return await db.get('novels', novelId);
+    },
+
+    // ===== 伏笔（v2.6.0 数据层，此前缺失导致伏笔页整条链路报错）=====
+    async listForeshadowing(novelId) {
+        const novel = await this.get(novelId);
+        if (!novel || !Array.isArray(novel.foreshadowing)) return [];
+        return novel.foreshadowing;
+    },
+
+    async getForeshadowing(foreshadowingId) {
+        const novels = await this.list();
+        for (const novel of novels) {
+            const item = (novel.foreshadowing || []).find(f => f.id === foreshadowingId);
+            if (item) return { ...item, novelId: novel.id };
+        }
+        return null;
+    },
+
+    async createForeshadowing(novelId, data) {
+        const novel = await this.get(novelId);
+        if (!novel) throw new Error('作品不存在');
+        if (!Array.isArray(novel.foreshadowing)) novel.foreshadowing = [];
+        const item = {
+            id: `fs_${novelId}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+            novelId,
+            description: data.description || '',
+            plantChapter: data.plantChapter || 1,
+            targetChapter: data.targetChapter || 1,
+            impact: data.impact || 'medium',
+            status: data.status || 'planted',
+            notes: data.notes || '',
+            created: Date.now(),
+            updated: Date.now()
+        };
+        novel.foreshadowing.push(item);
+        novel.updated = Date.now();
+        await db.put('novels', novel);
+        return item;
+    },
+
+    async updateForeshadowing(foreshadowingId, data) {
+        const found = await this.getForeshadowing(foreshadowingId);
+        if (!found) throw new Error('伏笔不存在');
+        const novel = await this.get(found.novelId);
+        const idx = novel.foreshadowing.findIndex(f => f.id === foreshadowingId);
+        if (idx < 0) throw new Error('伏笔不存在');
+        novel.foreshadowing[idx] = {
+            ...novel.foreshadowing[idx],
+            ...data,
+            updated: Date.now()
+        };
+        novel.updated = Date.now();
+        await db.put('novels', novel);
+        return novel.foreshadowing[idx];
+    },
+
+    async deleteForeshadowing(foreshadowingId) {
+        const found = await this.getForeshadowing(foreshadowingId);
+        if (!found) throw new Error('伏笔不存在');
+        const novel = await this.get(found.novelId);
+        novel.foreshadowing = (novel.foreshadowing || []).filter(f => f.id !== foreshadowingId);
+        novel.updated = Date.now();
+        await db.put('novels', novel);
+        return true;
     },
 
     async create(title, description = '', genre = '') {
@@ -426,6 +682,11 @@ const novelManager = {
 
     async saveChapter(novelId, chapterNum, title, content, paragraphs = null) {
         const id = `${novelId}_ch${chapterNum}`;
+        const existing = await db.get('chapters', id);
+        // 覆盖前自动存档旧版本，AI 写崩或误改后可回滚
+        if (existing && existing.content && existing.content !== content) {
+            await this.archiveChapterVersion(existing);
+        }
         const chapter = {
             id,
             novelId,
@@ -433,9 +694,11 @@ const novelManager = {
             title: title || `第${chapterNum}章`,
             content,
             wordCount: content.length,
-            created: Date.now(),
+            // 保留首次创建时间（旧代码每次保存都重写 created）
+            created: existing && existing.created ? existing.created : Date.now(),
             updated: Date.now()
         };
+        if (existing && existing.summary) chapter.summary = existing.summary;
         if (paragraphs !== null) {
             chapter.paragraphs = paragraphs;
         }
@@ -457,6 +720,56 @@ const novelManager = {
     async deleteChapter(novelId, chapterNum) {
         const id = `${novelId}_ch${chapterNum}`;
         await db.delete('chapters', id);
+        const versions = await this.listChapterVersions(novelId, chapterNum);
+        for (const v of versions) await db.delete('versions', v.id);
+    },
+
+    // ===== 章节版本历史（v2.8.0）=====
+    async archiveChapterVersion(chapter) {
+        const record = {
+            id: `ver_${chapter.id}_${Date.now()}`,
+            chapterId: chapter.id,
+            novelId: chapter.novelId,
+            chapterNum: chapter.number,
+            title: chapter.title || '',
+            content: chapter.content || '',
+            wordCount: chapter.wordCount || (chapter.content || '').length,
+            source: chapter.lastEditor || 'manual',
+            created: Date.now()
+        };
+        await db.put('versions', record);
+        // 每章最多保留 20 份历史，超出丢弃最旧的
+        const list = await this.listChapterVersions(chapter.novelId, chapter.number);
+        if (list.length > 20) {
+            for (const old of list.slice(20)) await db.delete('versions', old.id);
+        }
+        return record;
+    },
+
+    async listChapterVersions(novelId, chapterNum) {
+        const chapterId = `${novelId}_ch${chapterNum}`;
+        const all = await db.getAll('versions', 'chapterId', chapterId);
+        return all.sort((a, b) => (b.created || 0) - (a.created || 0));
+    },
+
+    async restoreChapterVersion(versionId) {
+        const version = await db.get('versions', versionId);
+        if (!version) throw new Error('版本不存在');
+        const chapter = await db.get('chapters', version.chapterId);
+        // 回滚前先把当前内容也存档，回滚本身可再被撤销
+        if (chapter && chapter.content) await this.archiveChapterVersion(chapter);
+        await this.saveChapter(version.novelId, version.chapterNum, version.title, version.content);
+        return true;
+    },
+
+    async saveChapterSummary(novelId, chapterNum, summary) {
+        const chapter = await this.getChapter(novelId, chapterNum);
+        if (!chapter) throw new Error('章节不存在');
+        chapter.summary = summary;
+        chapter.summaryUpdated = Date.now();
+        chapter.updated = Date.now();
+        await db.put('chapters', chapter);
+        return chapter;
     },
 
     async getStats() {
@@ -714,49 +1027,55 @@ function navigateTo(page, params = {}, isRootTab = false) {
         view.classList.add('active');
     }
 
+    // 注意：所有渲染函数第一个参数都是页面容器 view。
+    // 旧代码这里大量漏传 view，导致 container/novelId 参数错位，页面拿不到作品数据而崩溃或空屏。
     const renderers = {
         bookshelf: renderBookshelf,
         writing: renderWriting,
         settings: renderSettings,
-        novelDetail: () => renderNovelDetail(params.novelId),
-        chapterEdit: () => renderChapterEdit(params.novelId, params.chapterNum),
+        novelDetail: (view) => renderNovelDetail(view, params.novelId),
+        chapterEdit: (view) => renderChapterEdit(view, params.novelId, params.chapterNum),
         about: renderAbout,
         chat: renderChat,
         // 技能中心
         skillCenter: renderSkillCenter,
-        skillDetail: () => renderSkillDetail(params.skillId),
-        skillUse: () => renderSkillUse(params.skillId, params.mode),
+        skillDetail: (view) => renderSkillDetail(view, params.skillId),
+        skillUse: (view) => renderSkillUse(view, params.skillId, params.mode),
         skillHistory: renderSkillHistory,
         // Skill 广场
         skillPlaza: renderSkillPlaza,
         // 蒸馏
         distill: renderDistill,
         distillTemplates: renderDistillTemplates,
-        distillResult: () => renderDistillResult(params.templateId),
-        distillWrite: () => renderDistillWrite(params.templateId),
+        distillResult: (view) => renderDistillResult(view, params.templateId),
+        distillWrite: (view) => renderDistillWrite(view, params.templateId),
         // 参数配置
         paramConfig: renderParamConfig,
         // 数据管理
         dataManage: renderDataManage,
         // 大纲编辑器
-        outlineEditor: () => renderOutlineEditor(params.novelId),
+        outlineEditor: (view) => renderOutlineEditor(view, params.novelId),
         // 情节推演
-        plotSimulate: () => renderPlotSimulate(params.novelId),
+        plotSimulate: (view) => renderPlotSimulate(view, params.novelId),
         // 节拍控制
-        beatControl: () => renderBeatControl(params.novelId, params.chapterNum),
+        beatControl: (view) => renderBeatControl(view, params.novelId, params.chapterNum),
         // 角色卡
-        characterCards: () => renderCharacterCards(params.novelId),
-        characterEdit: () => renderCharacterEdit(params.novelId, params.characterId),
+        characterCards: (view) => renderCharacterCards(view, params.novelId),
+        characterEdit: (view) => renderCharacterEdit(view, params.novelId, params.characterId),
         // 世界观
-        worldview: () => renderWorldView(params.novelId),
-        worldviewEdit: () => renderWorldviewEdit(params.novelId, params.worldviewId),
+        worldview: (view) => renderWorldView(view, params.novelId),
+        worldviewEdit: (view) => renderWorldviewEdit(view, params.novelId, params.worldviewId),
+        // 分段编辑（自身按 page id 取容器）
         paragraphEdit: () => renderParagraphEdit(params.novelId, params.chapterNum),
         // 多Agent协作
-        agentStudio: () => renderAgentStudio(params.novelId),
+        agentStudio: (view) => renderAgentStudio(view, params.novelId),
         // 一致性检查
-        consistencyCheck: () => renderConsistencyCheck(params.novelId),
+        consistencyCheck: (view) => renderConsistencyCheck(view, params.novelId),
         // 导出分发
-        novelExport: () => renderNovelExport(params.novelId)
+        novelExport: (view) => renderNovelExport(view, params.novelId),
+        // 伏笔追踪（此前未注册路由，点击菜单只会白屏）
+        foreshadowing: (view) => renderForeshadowing(params.novelId, view),
+        foreshadowingEdit: (view) => renderForeshadowingEdit(params.novelId, params.foreshadowingId, view)
     };
 
     if (renderers[page]) renderers[page](view);
@@ -1303,9 +1622,14 @@ async function renderChapterEdit(container, novelId, chapterNum) {
 
     container.innerHTML = `
         <div class="editor-container">
-            <input type="text" class="editor-title-input" id="chapter-title" value="${title}" placeholder="章节标题...">
-            <textarea class="editor-content" id="chapter-content" placeholder="在此开始写作...">${content}</textarea>
+            <input type="text" class="editor-title-input" id="chapter-title" value="${escapeHtml(title)}" placeholder="章节标题...">
+            <textarea class="editor-content" id="chapter-content" placeholder="在此开始写作...">${escapeHtml(content)}</textarea>
         </div>
+        ${chapter && chapter.summary ? `
+        <div class="chapter-summary-box">
+            <div class="chapter-summary-title">📌 本章摘要（供后续章节回顾）</div>
+            <div class="chapter-summary-text">${escapeHtml(chapter.summary).replace(/\n/g, '<br>')}</div>
+        </div>` : ''}
         <div class="action-buttons-row" style="margin-top: 12px;">
             <button class="btn btn-secondary" onclick="reviewThisChapter('${novelId}', ${chapterNum})">🔍 AI审稿</button>
             <button class="btn btn-primary" onclick="aiContinueChapter('${novelId}', ${chapterNum})">✨ AI续写</button>
@@ -1315,7 +1639,61 @@ async function renderChapterEdit(container, novelId, chapterNum) {
             <button class="btn btn-outline" onclick="navigateTo('paragraphEdit', { novelId: '${novelId}', chapterNum: ${chapterNum} })">📄 分段编辑</button>
             <button class="btn btn-outline" onclick="aiReaderSimulate('${novelId}', ${chapterNum})">🎭 AI读者</button>
         </div>
+        <div class="action-buttons-row" style="margin-top: 8px;">
+            <button class="btn btn-outline" onclick="generateChapterSummary('${novelId}', ${chapterNum})">📝 生成摘要</button>
+            <button class="btn btn-outline" onclick="showChapterHistory('${novelId}', ${chapterNum})">🕘 历史版本</button>
+        </div>
     `;
+}
+
+// 生成章节摘要：后续章节的上下文会用到，避免长篇失忆
+async function generateChapterSummary(novelId, chapterNum) {
+    try {
+        ui.showToast('AI 正在生成摘要...');
+        const summary = await ai.summarizeChapter(novelId, chapterNum);
+        ui.showToast('摘要已保存');
+        navigateTo('chapterEdit', { novelId, chapterNum });
+    } catch (e) {
+        ui.showToast('摘要生成失败: ' + e.message);
+    }
+}
+
+async function showChapterHistory(novelId, chapterNum) {
+    const versions = await novelManager.listChapterVersions(novelId, chapterNum);
+    const body = versions.length === 0
+        ? '<div class="empty-state"><div class="empty-title">暂无历史版本</div><div class="empty-desc">每次保存/覆盖时会自动存档旧内容</div></div>'
+        : versions.map(v => `
+            <div class="version-item">
+                <div class="version-meta">
+                    <div class="version-time">${formatDate(v.created)} · ${v.wordCount || 0} 字</div>
+                    <div class="version-title">${escapeHtml(v.title || '')}</div>
+                    <div class="version-preview">${escapeHtml((v.content || '').substring(0, 80))}…</div>
+                </div>
+                <div class="version-actions">
+                    <button class="btn btn-outline btn-sm" onclick="previewChapterVersion('${v.id}')">查看</button>
+                    <button class="btn btn-primary btn-sm" onclick="confirmRestoreVersion('${v.id}', '${novelId}', ${chapterNum})">回滚</button>
+                </div>
+            </div>`).join('');
+    const modal = createModal('🕘 历史版本', `<div class="version-list">${body}</div>`);
+    modal.show();
+}
+
+async function previewChapterVersion(versionId) {
+    const v = await db.get('versions', versionId);
+    if (!v) { ui.showToast('版本不存在'); return; }
+    createModal('版本内容', `<div style="white-space: pre-wrap; max-height: 60vh; overflow-y: auto; font-size: 14px; line-height: 1.7;">${escapeHtml(v.content || '')}</div>`).show();
+}
+
+async function confirmRestoreVersion(versionId, novelId, chapterNum) {
+    if (!confirm('回滚会用该版本覆盖当前内容（当前内容也会存档，可再回滚回来）。确定继续？')) return;
+    try {
+        await novelManager.restoreChapterVersion(versionId);
+        ui.showToast('已回滚到所选版本');
+        closeModal();
+        navigateTo('chapterEdit', { novelId, chapterNum });
+    } catch (e) {
+        ui.showToast('回滚失败: ' + e.message);
+    }
 }
 
 // ===== Writing Page =====
@@ -1616,6 +1994,7 @@ async function exportAllData() {
         a.click();
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 3000);
+        await settings.set('lastBackupAt', Date.now());
         ui.showToast('备份文件已导出');
     } catch (e) {
         ui.showToast('导出失败: ' + e.message);
@@ -1623,6 +2002,32 @@ async function exportAllData() {
         const btn = document.getElementById('btn-export');
         if (btn) { btn.disabled = false; btn.textContent = '导出数据'; }
     }
+}
+
+// 数据安全：作品只在本机，7 天没备份就主动提醒一次
+async function checkBackupReminder() {
+    try {
+        if (!store.novels || store.novels.length === 0) return;
+        const last = await settings.get('lastBackupAt', 0);
+        const later = await settings.get('backupRemindLaterAt', 0);
+        const day = 24 * 60 * 60 * 1000;
+        const daysSince = last ? Math.floor((Date.now() - last) / day) : null;
+        const need = !last || daysSince >= 7;
+        if (!need) return;
+        if (later && Date.now() - later < 3 * day) return; // 3 天内不重复打扰
+        const words = (store.novels || []).reduce((s, n) => s + (n.wordCount || 0), 0);
+        const modal = createModal('💾 建议备份一次', `
+            <div class="draft-hint">作品数据只保存在这台设备上。清缓存、换机、卸载 App 都会丢失，且无法找回。</div>
+            <div style="font-size: 14px; line-height: 1.8;">
+                当前共 <b>${store.novels.length}</b> 部作品，约 <b>${words}</b> 字。<br>
+                ${daysSince === null ? '你还没有做过任何备份。' : `距上次备份已 ${daysSince} 天。`}
+            </div>
+            <div class="draft-actions">
+                <button class="btn btn-outline" onclick="settings.set('backupRemindLaterAt', Date.now()); closeModal();">稍后再说</button>
+                <button class="btn btn-primary" onclick="closeModal(); navigateTo('dataManage');">立即备份</button>
+            </div>`);
+        modal.show();
+    } catch (e) { /* 提醒失败不影响主流程 */ }
 }
 
 function handleImportFile(input) {
@@ -1940,6 +2345,100 @@ async function createNovel() {
     }
 }
 
+// ===== AI 草稿候选制（v2.8.0）=====
+// AI 生成的内容先进候选区，作者确认/修改后才写入正文，避免一键覆盖已有稿件。
+function renderMessages(messages) {
+    return (messages || []).map(m => `【${m.role}】\n${m.content}`).join('\n\n');
+}
+
+function showAIDraftModal(opts) {
+    window.__aiDraft = { ...opts };
+    const d = window.__aiDraft;
+    const modal = createModal(opts.label || 'AI 草稿', `
+        <div class="draft-hint">AI 草稿只是候选，确认后才会写入正文；正文始终由你决定。</div>
+        <div class="form-group">
+            <label class="form-label">章节标题</label>
+            <input type="text" class="form-input" id="draft-title" value="${escapeHtml(d.title || '')}">
+        </div>
+        <div class="form-group">
+            <label class="form-label">正文（可直接修改后再采用）</label>
+            <textarea class="form-input" id="draft-content" rows="12">${escapeHtml(d.content || '')}</textarea>
+        </div>
+        <div id="draft-prompt" style="display:none; max-height: 34vh; overflow-y: auto; background: var(--bg-secondary, #f6f6f9); padding: 10px; border-radius: 8px; font-size: 12px; white-space: pre-wrap;">${escapeHtml(renderMessages(d.messages))}</div>
+        <div class="draft-actions">
+            <button class="btn btn-outline" onclick="toggleDraftPrompt()">查看提示词</button>
+            <button class="btn btn-outline" onclick="regenerateDraft()">重新生成</button>
+            <button class="btn btn-outline" onclick="copyDraft()">复制</button>
+            ${opts.mode === 'append' ? `<button class="btn btn-primary" onclick="appendDraft()">追加到当前章节</button>` : `<button class="btn btn-primary" onclick="adoptDraft()">采用并保存</button>`}
+        </div>
+    `);
+    modal.show();
+}
+
+function toggleDraftPrompt() {
+    const el = document.getElementById('draft-prompt');
+    if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function copyDraft() {
+    await copyName(document.getElementById('draft-content')?.value || '');
+}
+
+async function regenerateDraft() {
+    const d = window.__aiDraft;
+    if (!d) return;
+    try {
+        const novel = await novelManager.get(d.novelId);
+        const chapters = await novelManager.listChapters(d.novelId);
+        ui.showToast('正在重新生成...');
+        const content = await ai.continueChapter(novel, chapters, d.chapterNum, d.prompt || '');
+        showAIDraftModal({ ...d, content, messages: ai.lastMessages });
+    } catch (e) {
+        ui.showToast('重新生成失败: ' + e.message);
+    }
+}
+
+async function adoptDraft() {
+    const d = window.__aiDraft;
+    if (!d) return;
+    const title = document.getElementById('draft-title')?.value.trim() || `第${d.chapterNum}章`;
+    const content = document.getElementById('draft-content')?.value || '';
+    if (!content.trim()) { ui.showToast('草稿内容为空'); return; }
+    try {
+        await novelManager.saveChapter(d.novelId, d.chapterNum, title, content);
+        ui.showToast('已写入第' + d.chapterNum + '章');
+        closeModal();
+        navigateTo('chapterEdit', { novelId: d.novelId, chapterNum: d.chapterNum });
+    } catch (e) {
+        ui.showToast('保存失败: ' + e.message);
+    }
+}
+
+async function appendDraft() {
+    const d = window.__aiDraft;
+    if (!d) return;
+    const content = document.getElementById('draft-content')?.value || '';
+    if (!content.trim()) { ui.showToast('草稿内容为空'); return; }
+    const textarea = document.getElementById('chapter-content');
+    if (textarea) {
+        textarea.value += (textarea.value ? '\n\n' : '') + content;
+        ui.showToast('已追加到编辑器，记得保存');
+        closeModal();
+        return;
+    }
+    // 编辑器未打开时，直接追加到已保存的章节内容后面
+    try {
+        const chapter = await novelManager.getChapter(d.novelId, d.chapterNum);
+        const merged = (chapter && chapter.content ? chapter.content + '\n\n' : '') + content;
+        await novelManager.saveChapter(d.novelId, d.chapterNum, (chapter && chapter.title) || `第${d.chapterNum}章`, merged);
+        ui.showToast('已追加保存');
+        closeModal();
+        navigateTo('chapterEdit', { novelId: d.novelId, chapterNum: d.chapterNum });
+    } catch (e) {
+        ui.showToast('追加失败: ' + e.message);
+    }
+}
+
 function showWriteChapterModal(novelId) {
     const modal = createModal('写新章节', `
         <div style="display: flex; flex-direction: column; gap: 16px;">
@@ -1964,11 +2463,19 @@ async function createAndWriteChapter(novelId) {
     try {
         const novel = await novelManager.get(novelId);
         const chapters = await novelManager.listChapters(novelId);
-        const content = await ai.generateNovel(novel) || await ai.continueChapter(novel, chapters, num, prompt);
-
-        await novelManager.saveChapter(novelId, num, title || `第${num}章`, content);
-        ui.showToast(`第${num}章写作完成！`);
-        navigateTo('chapterEdit', { novelId, chapterNum: num });
+        const content = await ai.continueChapter(novel, chapters, num, prompt);
+        const existing = chapters.find(c => c.number === num);
+        // 改为候选制：先给作者看，确认/修改后才写入
+        showAIDraftModal({
+            novelId,
+            chapterNum: num,
+            title: title || `第${num}章`,
+            content,
+            messages: ai.lastMessages,
+            prompt,
+            mode: existing ? 'append' : 'new',
+            label: `AI 草稿 · 第${num}章`
+        });
     } catch (err) {
         ui.showToast('写作失败: ' + err.message);
     }
@@ -2013,12 +2520,16 @@ async function aiContinueChapter(novelId, chapterNum) {
 
         ui.showToast('AI 正在续写...');
         const content = await ai.continueChapter(novel, prevChapters, chapterNum, '');
-
-        const textarea = document.getElementById('chapter-content');
-        if (textarea) {
-            textarea.value += (textarea.value ? '\n\n' : '') + content;
-        }
-        ui.showToast('续写完成！');
+        showAIDraftModal({
+            novelId,
+            chapterNum,
+            title: `第${chapterNum}章`,
+            content,
+            messages: ai.lastMessages,
+            prompt: '',
+            mode: 'append',
+            label: `AI 续写草稿 · 第${chapterNum}章`
+        });
     } catch (err) {
         ui.showToast('续写失败: ' + err.message);
     }
@@ -2038,9 +2549,17 @@ async function startWriting() {
         ui.showToast('AI 正在写作中...');
 
         const content = await ai.continueChapter(novel, chapters, chapterNum, prompt);
-        await novelManager.saveChapter(novelId, chapterNum, `第${chapterNum}章`, content);
-        ui.showToast('写作完成！');
-        navigateTo('chapterEdit', { novelId, chapterNum });
+        const existing = chapters.find(c => c.number === chapterNum);
+        showAIDraftModal({
+            novelId,
+            chapterNum,
+            title: existing ? existing.title : `第${chapterNum}章`,
+            content,
+            messages: ai.lastMessages,
+            prompt,
+            mode: existing ? 'append' : 'new',
+            label: `AI 草稿 · 第${chapterNum}章`
+        });
     } catch (err) {
         ui.showToast('写作失败: ' + err.message);
     }
@@ -2248,6 +2767,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (err) {
         console.error('Failed to load novels:', err);
     }
+
+    // 数据只在本机，超过 7 天没备份时提醒一次
+    await checkBackupReminder();
 
     // Default to chat page (matching competitor)
     navigateTo('chat');
@@ -3971,11 +4493,14 @@ ${text.substring(0, 800)}
 }
 
 // ===== Foreshadowing DAG (v2.6.0) =====
-async function renderForeshadowing(novelId) {
+async function renderForeshadowing(novelId, container) {
     const novel = await novelManager.getNovel(novelId);
     if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    const view = container || document.getElementById('page-foreshadowing') || document.getElementById('main-content');
     const items = await novelManager.listForeshadowing(novelId);
-    const totalChapters = novel.chapters || 1;
+    // 旧代码误用 novel.chapters（不存在），导致进度与逾期判断始终按 1 章计算
+    const chapters = await novelManager.listChapters(novelId);
+    const totalChapters = Math.max(1, novel.chapterCount || chapters.length || 1);
     ui.setPageTitle(`🔍 伏笔追踪 · ${escapeHtml(novel.title)}`);
     ui.setHeaderActions(`
         <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
@@ -4028,7 +4553,7 @@ async function renderForeshadowing(novelId) {
             </div>`;
         }).join('');
     };
-    const content = document.getElementById('view-container');
+    const content = view;
     content.innerHTML = `
         <div style="padding: 12px 16px;">
             <div class="fs-filter-row">
@@ -4049,19 +4574,21 @@ async function renderForeshadowing(novelId) {
     renderForeshadowingList(items, totalChapters, novelId);
 }
 
-async function renderForeshadowingEdit(novelId, foreshadowingId) {
+async function renderForeshadowingEdit(novelId, foreshadowingId, viewContainer) {
     const novel = await novelManager.getNovel(novelId);
     if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
     const fs = foreshadowingId ? await novelManager.getForeshadowing(foreshadowingId) : null;
     const isNew = !fs;
-    const maxChapter = Math.max(1, novel.chapters || 1);
+    const chapters = await novelManager.listChapters(novelId);
+    const maxChapter = Math.max(1, novel.chapterCount || chapters.length || 1);
+    const viewRoot = viewContainer || document.getElementById('page-foreshadowingEdit') || document.getElementById('main-content');
     ui.setPageTitle(isNew ? '新建伏笔' : '编辑伏笔');
     ui.setHeaderActions(`
         <button class="header-btn" onclick="navigateTo('foreshadowing', { novelId: '${novelId}' })">返回</button>
         ${!isNew ? `<button class="header-btn" onclick="deleteForeshadowing('${foreshadowingId}', '${novelId}')">删除</button>` : ''}
         <button class="header-btn" onclick="saveForeshadowing('${novelId}', '${foreshadowingId || ''}')">保存</button>
     `);
-    const container = document.getElementById('view-container');
+    const container = viewRoot;
     container.innerHTML = `
         <div style="padding: 12px 16px; display:flex; flex-direction:column; gap: 14px;">
             <div>
