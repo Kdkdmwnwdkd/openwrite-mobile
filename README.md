@@ -1,185 +1,108 @@
 # OpenWrite Mobile
 
-基于 [OpenWrite](https://github.com/LiPu-jpg/Openwrite) 开源项目构建的移动端 AI 小说写作助手。
+基于 [OpenWrite](https://github.com/LiPu-jpg/Openwrite)（Apache-2.0）开源项目二次开发的**移动端 AI 小说写作助手**。
+
+纯前端架构：所有逻辑运行在浏览器 / WebView 中，作品数据全部保存在本机 IndexedDB，**不上传任何服务器**；AI 请求由前端直连模型供应商，仅在调用模型时联网。
 
 ## 最新版本下载
 
-| 版本 | 日期 | 大小 | 下载链接 |
-|------|------|------|----------|
-| **nightly-debug** | 2026-09-16 | 3.3 MB | [点击下载](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/download/nightly-debug/app-debug.apk) |
+每次 push 到 `master`，GitHub Actions 会自动构建并更新以下 Release：
 
----
+| 版本 | 更新日期 | 大小 | 下载链接 |
+|------|----------|------|----------|
+| **nightly-debug** | 2026-09-18 | 3.69 MB | [app-debug.apk](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/download/nightly-debug/app-debug.apk) |
+
+> 这是 debug 签名包（仅供测试，不适合正式分发）。当前版本号见 `package.json` / 应用「设置 → 关于」。
 
 ## 功能特性
 
-- 📚 **书架管理**：查看和管理你的所有作品
-- ✍️ **智能写作**：AI 辅助生成章节内容
-- 🔍 **AI 审稿**：自动检查章节质量
-- ⚙️ **模型配置**：支持 DeepSeek、OpenAI、Claude 等多种模型
-- 💾 **本地优先**：所有数据保存在本地，隐私安全
-- 📱 **PWA 支持**：可安装到手机桌面，离线可用
+**写作主线**
 
-## 技术架构
+- 书架管理：作品、章节、字数统计
+- 对话式建书：几轮问答生成书名、设定与大纲
+- 章节编辑器：段落级编辑、自动保存、AI 续写 / 扩写
+- AI 审稿：打分 + 具体问题定位与修改建议
+- AI 读者模拟：以资深读者视角给出评分、情绪曲线、爽点与问题清单（v2.7 新增）
+- 多 Agent 协作：规划 / 写作 / 审稿角色协同（v2.7 新增）
 
-```
-OpenWrite-Mobile/
-├── backend/          # FastAPI 后端桥接层
-│   ├── main.py      # API 路由和逻辑
-│   └── requirements.txt
-├── frontend/         # PWA 前端
-│   ├── index.html    # 主页面
-│   ├── css/
-│   │   └── style.css # 移动端适配样式
-│   ├── js/
-│   │   └── app.js    # 核心应用逻辑
-│   ├── sw.js         # Service Worker (离线支持)
-│   └── manifest.json # PWA 配置
-├── scripts/          # 构建和部署脚本
-└── docs/             # 文档
-```
+**设定与结构**
+
+- 世界观库、角色卡、人物关系
+- 大纲编辑器 / 演进系统、情节推演、节拍控制
+- 伏笔追踪、一致性检查（支持一键替换全文）
+- 备忘录系统
+
+**AI 工具箱**
+
+- 模型配置：DeepSeek / OpenAI / Claude / GLM 等任何 OpenAI 兼容接口
+- 参数配置：温度、上下文窗口、系统提示词、自动压缩
+- 技能中心 / Skill 广场：内置「去 AI 味润色」等技能，支持导入自定义技能
+- 文风蒸馏：从参考文本蒸馏可执行写作约束
+- AI 起名：按题材、身份、性别批量生成人名
+- 数据管理：全量备份 / 恢复、导入导出
+- 导出：Markdown / TXT 等格式（EPUB 规划中）
+
+**已知限制（占位实现，点击会提示「开发中」）**：拆解、扫榜、联网搜索等。完整能力见代码内相关标记。
 
 ## 快速开始
 
-### 1. 克隆项目
-
 ```bash
-git clone https://github.com/Kdkdmwnwdkd/openwrite-mobile.git
-cd openwrite-mobile
+# 本地静态托管 frontend/ 即可运行，无需后端
+python3 -m http.server 8080 --directory frontend
+# 打开 http://localhost:8080
 ```
 
-### 2. 安装依赖
+首次使用：
+
+1. 「设置 → 模型配置」填入 API Key 与模型名
+2. 「设置 → 参数配置」按需调整生成参数
+3. 「设置 → 数据管理」先做一次全量备份（换机 / 清缓存前务必再备份）
+4. 详细部署方式见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+
+## 打包为移动应用
 
 ```bash
-# 安装 Node.js 依赖
 npm install
-
-# 安装 Python 依赖
-cd backend
-pip install -r requirements.txt
+npx cap add android        # 或 ios
+npx cap sync
+npx cap open android        # Android Studio 构建
 ```
 
-### 3. 配置 OpenWrite 核心
+GitHub Actions 已内置 Android 构建流水线，详见 `.github/workflows/build.yml`。
 
-确保 OpenWrite 核心已安装：
+## 目录结构
 
-```bash
-# 在 OpenWrite 核心目录
-cd ../Openwrite  # 或你的 OpenWrite 安装路径
-pip install -e .
+```
+openwrite-mobile/
+├── frontend/          # 纯前端应用（PWA + Capacitor webDir）
+│   ├── index.html     # 入口
+│   ├── css/style.css
+│   ├── js/app.js      # 核心逻辑、路由、页面渲染
+│   ├── js/skills.js   # 技能定义
+│   ├── js/distill.js  # 文风蒸馏
+│   ├── js/export.js   # 导出（markdown / zip 打包）
+│   ├── images/        # PWA 图标
+│   ├── sw.js          # Service Worker（离线缓存）
+│   └── manifest.json
+├── docs/DEPLOYMENT.md
+├── scripts/           # 构建脚本
+├── package.json       # 版本号与 Capacitor 配置
+└── LICENSE            # Apache-2.0
 ```
 
-### 4. 启动后端服务
-
-```bash
-cd backend
-python -m uvicorn main:app --host 0.0.0.0 --port 4567
-```
-
-### 5. 访问应用
-
-打开浏览器访问 `http://localhost:4567` 或前端开发服务器地址。
-
-## 打包为 Android APK
-
-### 前提条件
-
-- Node.js >= 22.0.0
-- Android Studio
-- Android SDK
-
-### 打包步骤
-
-```bash
-# 1. 安装 Capacitor 平台
-npm run add:android
-
-# 2. 同步前端资源到原生项目
-npm run build:capacitor
-
-# 3. 构建 APK
-npm run build:android
-
-# 4. 或用 Android Studio 打开调试
-npm run open:android
-```
-
-## 打包为 iOS App
-
-```bash
-# 1. 安装 Capacitor iOS 平台
-npm run add:ios
-
-# 2. 同步资源
-npm run build:capacitor
-
-# 3. 用 Xcode 打开
-npm run open:ios
-```
-
-## 配置 AI 模型
-
-在应用设置中配置你的 API Key：
-
-1. 打开应用 → 设置 → 模型配置
-2. 输入你的 API Key
-3. 选择模型（DeepSeek Chat / GPT-4 / Claude 等）
-4. 可选：自定义 Base URL
-
-支持的模型提供商：
-- DeepSeek
-- OpenAI
-- Anthropic (Claude)
-- 智谱 AI (GLM)
-- 任何兼容 OpenAI API 格式的服务
-
-## 开发指南
-
-### 目录结构说明
-
-- `backend/main.py`: FastAPI 后端，封装 OpenWrite CLI 命令
-- `frontend/js/app.js`: 前端核心逻辑，页面路由和数据管理
-- `frontend/css/style.css`: 移动端适配的 CSS 样式
-
-### 添加新页面
-
-1. 在 `frontend/js/app.js` 的 `renderers` 对象中添加渲染函数
-2. 在 `navigateTo` 函数中添加路由映射
-3. 在 HTML/CSS 中添加对应样式
-
-### 扩展 API
-
-1. 在 `backend/main.py` 中添加新的 FastAPI 路由
-2. 使用 `run_openwrite()` 函数调用 OpenWrite CLI
-3. 在前端 `api` 对象中添加对应方法
+`backend/` 目录为早期 FastAPI 桥接层的历史遗留，当前版本前端不依赖它，不再维护。
 
 ## 与原版 OpenWrite 的关系
 
-本项目是 OpenWrite 的**移动端封装**，而非替代品：
+本项目是 OpenWrite 的**移动端重写**（v2.x 起为纯前端本地优先形态），沿用其创作方法论与部分提示词设计。上游版权归 [LiPu-jpg/Openwrite](https://github.com/LiPu-jpg/Openwrite) 所有，本项目以 Apache-2.0 许可分发。
 
-- 后端复用 OpenWrite 核心逻辑（大纲、写作、审稿、伏笔管理等）
-- 前端提供移动端友好的界面
-- 数据格式与 OpenWrite 兼容（Markdown 文件）
-- 可以与本地的 OpenWrite CLI 共同使用
+## 开发
 
-## 许可证
+- 页面路由统一在 `frontend/js/app.js` 的 `navigateTo()` / `renderers` 中注册
+- 数据层为 IndexedDB（`db` 对象），备份走 `db.exportAll()`（API Key 自动脱敏）/ `db.importAll()`
+- AI 调用统一走 `ai.chat()`，自动应用「参数配置」的温度 / 上下文 / 系统提示词
+- 提交前请通过 `node --check frontend/js/*.js` 校验语法
 
-Apache-2.0 License
+## 开源许可
 
-基于 [OpenWrite](https://github.com/LiPu-jpg/Openwrite) 开源项目构建。
-
-## 社区
-
-- OpenWrite AI 写作交流群：1106407987
-- GitHub Issues: https://github.com/Kdkdmwnwdkd/openwrite-mobile/issues
-
-## 版本历史
-
-### v2.0.1 (当前)
-- 初始移动端版本
-- 支持书架、写作、设置三大模块
-- 集成 AI 写作和审稿功能
-- PWA 离线支持
-
----
-
-**注意**：本项目仍在开发中，部分功能尚未完全实现。欢迎提交 Issue 和 PR。
+[Apache-2.0](LICENSE)

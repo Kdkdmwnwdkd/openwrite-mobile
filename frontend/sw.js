@@ -1,11 +1,24 @@
 // OpenWrite Mobile Service Worker
-const CACHE_NAME = 'openwrite-mobile-v1';
+const CACHE_NAME = 'openwrite-mobile-v2';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
     '/css/style.css',
     '/js/app.js',
-    '/manifest.json'
+    '/js/skills.js',
+    '/js/distill.js',
+    '/js/export.js',
+    '/manifest.json',
+    '/favicon.png',
+    '/images/apple-touch-icon.png',
+    '/images/icon-72.png',
+    '/images/icon-96.png',
+    '/images/icon-128.png',
+    '/images/icon-144.png',
+    '/images/icon-152.png',
+    '/images/icon-192.png',
+    '/images/icon-384.png',
+    '/images/icon-512.png'
 ];
 
 // Install - cache static assets

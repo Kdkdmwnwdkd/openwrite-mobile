@@ -124,10 +124,20 @@ const db = {
             if (!database.objectStoreNames.contains(store)) continue;
             result[store] = await this.getAll(store);
         }
+        // 安全：备份文件不含任何 API Key / Token。
+        // 导入时若检测到缺失的 Key，保留设备本机原有的配置。
+        if (Array.isArray(result.settings)) {
+            result.settings = result.settings.map((item) => {
+                if (!item || item.key !== 'modelConfig' || !item.value) return item;
+                const redacted = { ...item, value: { ...item.value, apiKey: '' } };
+                return redacted;
+            });
+        }
         return {
             app: CONFIG.APP_NAME,
             version: CONFIG.VERSION,
             exportedAt: new Date().toISOString(),
+            redacted: ['settings.modelConfig.apiKey'],
             stores: result
         };
     },
@@ -135,15 +145,25 @@ const db = {
     async importAll(backup) {
         const database = await this.open();
         const stores = backup && backup.stores ? backup.stores : backup || {};
+        // 还原 apiKey：本机已有的 Key 优先，避免备份文件带过来的空值覆盖掉真实 Key
+        const localModelConfig = await this.get('settings', 'modelConfig');
+        const localKey = localModelConfig && localModelConfig.value ? localModelConfig.value.apiKey : '';
         for (const store of this.STORES) {
             if (!database.objectStoreNames.contains(store)) continue;
             const records = stores[store];
             if (!Array.isArray(records)) continue;
+            let prepared = records;
+            if (store === 'settings' && localKey) {
+                prepared = records.map((r) => {
+                    if (!r || r.key !== 'modelConfig' || !r.value || r.value.apiKey) return r;
+                    return { ...r, value: { ...r.value, apiKey: localKey } };
+                });
+            }
             const tx = database.transaction(store, 'readwrite');
             const os = tx.objectStore(store);
             await new Promise((resolve, reject) => {
                 os.clear();
-                records.forEach(r => os.put(r));
+                prepared.forEach(r => os.put(r));
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
             });
@@ -744,8 +764,13 @@ function navigateTo(page, params = {}, isRootTab = false) {
 }
 
 // ===== Chat / Home Page =====
-function renderChat(container) {
+async function renderChat(container) {
     ui.setPageTitle('新对话');
+    // 模型名以「模型配置」为准（曾硬编码 glm-5.1，与实际配置不一致）
+    try {
+        const modelConfig = await settings.getModelConfig();
+        store.modelName = modelConfig.model || 'glm-5.1';
+    } catch (e) { /* 读取失败时保留默认值 */ }
     // 竞品风格：无顶部操作按钮，模型名在标题下方显示
     ui.setHeaderActions(`
         <button class="hamburger-btn" onclick="openChatDrawer()">
@@ -756,7 +781,7 @@ function renderChat(container) {
     container.innerHTML = `
         <div style="padding: 0 16px; display: flex; flex-direction: column; height: calc(100vh - 120px); overflow-y: auto;">
             <!-- 顶部模型指示器 -->
-            <div style="font-size: 13px; color: var(--text-tertiary); margin: 4px 0 12px;">${store.modelName || 'glm-5.1'}</div>
+            <div style="font-size: 13px; color: var(--text-tertiary); margin: 4px 0 12px;">${store.modelName}</div>
 
             <!-- 快捷工具胶囊行 -->
             <div class="chat-tool-row">
@@ -929,7 +954,125 @@ async function clearChatSkill() {
 // ===== 模型/记忆/起名/蒸馏/拆解/扫榜 入口 =====
 function showModelIndicator() { showModelConfigModal(); }
 function showMemory() { ui.showToast('记忆功能：写作设定记忆库开发中...'); }
-function showNameGenerator() { ui.showToast('起名功能开发中...'); }
+function showNameGenerator() {
+    const modal = createModal('AI 起名', `
+        <div class="form-group">
+            <label class="form-label">题材 / 风格</label>
+            <select class="form-input" id="ng-genre">
+                <option>玄幻</option>
+                <option>仙侠</option>
+                <option>都市</option>
+                <option>科幻</option>
+                <option>西幻</option>
+                <option>武侠</option>
+                <option>民国</option>
+                <option>悬疑</option>
+                <option>通用</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">身份（选填）</label>
+            <input type="text" class="form-input" id="ng-role" placeholder="如：主角、女主、反派、门派长老">
+        </div>
+        <div class="form-group">
+            <label class="form-label">性别</label>
+            <select class="form-input" id="ng-gender">
+                <option value="不限">不限</option>
+                <option value="男">男</option>
+                <option value="女">女</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">姓氏（选填）</label>
+            <input type="text" class="form-input" id="ng-surname" placeholder="如：叶、苏、萧，留空自由发挥">
+        </div>
+        <button class="btn btn-primary btn-block" id="ng-btn" onclick="runNameGenerator()">生成名字</button>
+        <div id="ng-result" style="margin-top: 16px; color: var(--text-tertiary); font-size: 13px;">未配置 API Key 时无法生成，请先在「设置 → 模型配置」填写。</div>
+    `);
+    modal.show();
+}
+
+async function runNameGenerator() {
+    const genre = document.getElementById('ng-genre')?.value || '通用';
+    const role = document.getElementById('ng-role')?.value.trim() || '';
+    const gender = document.getElementById('ng-gender')?.value || '不限';
+    const surname = document.getElementById('ng-surname')?.value.trim() || '';
+    const resultEl = document.getElementById('ng-result');
+    const btn = document.getElementById('ng-btn');
+
+    btn.disabled = true;
+    btn.textContent = '生成中…';
+    if (resultEl) resultEl.innerHTML = '<div style="color: var(--text-tertiary); font-size: 13px;">正在构思名字…</div>';
+
+    const prompt = `请为一部${genre}小说构思人名。
+要求：
+- 身份：${role || '不限'}
+- 性别：${gender}
+- ${surname ? `姓氏固定为「${surname}」` : '姓氏不限，可自行搭配合适的复姓或单姓'}
+- 共给出 10 个候选，兼顾字面意境、读音和记忆点，避免烂大街的名字
+
+请严格输出JSON格式（不要markdown代码块）：
+{"names": [{"name": "完整姓名", "style": "名字风格/气质", "reason": "一句话构思说明"}]}`;
+
+    try {
+        const result = await ai.chat([
+            { role: 'system', content: '你是精通中文姓名文化与网文角色命名的起名专家，擅长为不同类型小说角色取贴合气质的名字。' },
+            { role: 'user', content: prompt }
+        ], null, 2000);
+
+        let data = null;
+        try {
+            const cleaned = result.replace(/```json?\s*/g, '').replace(/```\s*/g, '').trim();
+            data = JSON.parse(cleaned);
+        } catch (_) {
+            const m = result.match(/\{[\s\S]*\}/);
+            if (m) { try { data = JSON.parse(m[0]); } catch (_) {} }
+        }
+        const names = (data && Array.isArray(data.names)) ? data.names : [];
+        if (!names.length) throw new Error('未解析到有效结果');
+
+        if (resultEl) {
+            resultEl.innerHTML = names.map(n => `
+                <div class="ng-item">
+                    <div class="ng-main">
+                        <div class="ng-name">${escapeHtml(n.name || '')}</div>
+                        <div class="ng-meta">${escapeHtml(n.style || '')}</div>
+                        <div class="ng-reason">${escapeHtml(n.reason || '')}</div>
+                    </div>
+                    <button class="btn btn-outline btn-sm" onclick="copyName('${escapeHtml((n.name || '').replace(/'/g, "\\'"))}')">复制</button>
+                </div>
+            `).join('');
+        }
+    } catch (e) {
+        if (resultEl) resultEl.innerHTML = `<div style="color: var(--error, #ef4444); font-size: 13px;">生成失败：${escapeHtml(e.message)}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '生成名字';
+    }
+}
+
+async function copyName(name) {
+    if (!name) return;
+    try {
+        await navigator.clipboard.writeText(name);
+        ui.showToast('已复制：' + name);
+    } catch (e) {
+        // WebView 剪贴板权限受限时的降级方案
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = name;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            ui.showToast('已复制：' + name);
+        } catch (_) {
+            ui.showToast('复制失败，请手动选择');
+        }
+    }
+}
 function showDeconstruct() { ui.showToast('拆解功能开发中...'); }
 function showRank() { ui.showToast('扫榜功能开发中...'); }
 function continueWriting() { navigateTo('bookshelf'); }
@@ -1243,6 +1386,26 @@ async function renderSettings(container) {
                     <div>
                         <div class="settings-label">Skill 广场</div>
                         <div class="settings-value">发现与分享写作技能</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+            <div class="settings-item" onclick="navigateTo('paramConfig')">
+                <div class="settings-item-left">
+                    <div class="settings-icon"><svg viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg></div>
+                    <div>
+                        <div class="settings-label">参数配置</div>
+                        <div class="settings-value">温度、上下文窗口、系统提示词</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+            <div class="settings-item" onclick="navigateTo('dataManage')">
+                <div class="settings-item-left">
+                    <div class="settings-icon"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></div>
+                    <div>
+                        <div class="settings-label">数据管理</div>
+                        <div class="settings-value">备份与恢复（建议定期备份）</div>
                     </div>
                 </div>
                 <span class="settings-arrow">›</span>

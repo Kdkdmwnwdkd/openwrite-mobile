@@ -4182,3 +4182,19 @@ html, body {
 .status-dot.err { background: var(--danger); }
 .status-text-ok { color: var(--success); }
 .status-text-err { color: var(--danger); }
+
+/* ===== AI 起名结果列表 ===== */
+.ng-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+}
+.ng-item:last-child { border-bottom: none; }
+.ng-main { flex: 1; min-width: 0; }
+.ng-name { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+.ng-meta { font-size: 12px; color: var(--primary); margin-top: 2px; }
+.ng-reason { font-size: 12px; color: var(--text-tertiary); margin-top: 2px; }
+.btn-sm { padding: 6px 12px; font-size: 12px; }

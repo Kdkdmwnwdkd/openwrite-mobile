@@ -1,95 +1,61 @@
-# OpenWrite Mobile Deployment Guide
+# OpenWrite Mobile 部署指南
 
-## 部署方式
+> OpenWrite Mobile 是**纯前端架构**：所有逻辑运行在浏览器 / WebView 中，数据存 IndexedDB，AI 请求由前端直连模型供应商接口。不需要后端服务，也不存在服务端数据目录。
 
-### 方式一：本地开发服务器（推荐开发使用）
+## 方式一：本地静态托管（开发/自用）
 
 ```bash
-# 1. 安装依赖
-npm install
-cd backend && pip install -r requirements.txt && cd ..
-
-# 2. 启动后端
-python backend/main.py
-
-# 3. 访问 http://localhost:4567
+# 任选其一静态托管 frontend/ 目录
+python3 -m http.server 8080 --directory frontend
+# 或 npx serve frontend
 ```
 
-### 方式二：PWA 安装到手机
+访问 `http://localhost:8080` 即可。直接双击 `frontend/index.html`（file:// 协议）时部分浏览器会限制 IndexedDB / Service Worker，推荐用上面的方式。
 
-1. 用 Chrome/Edge 访问后端地址
-2. 点击地址栏"添加到主屏幕"
-3. 像原生 App 一样使用
+## 方式二：PWA 安装到手机
 
-### 方式三：打包 APK（完整原生体验）
+1. 把 `frontend/` 部署到任意静态托管（GitHub Pages、Vercel、Netlify、对象存储均可）
+2. 手机 Chrome 访问后点「添加到主屏幕」
+3. 图标、离线缓存已配置（`frontend/sw.js`）
 
-#### 在 GitHub Actions 自动构建
+## 方式三：打包 Android APK
 
-项目已配置 GitHub Actions 工作流，每次 push 到 main 分支会自动构建 APK：
+GitHub Actions 会在每次 push 到 `master` / `main` 后自动构建 debug APK 并更新 `nightly-debug` Release，也可手动触发（workflow_dispatch）。
 
-1. 推送代码到 GitHub
-2. 进入 Actions 页面
-3. 下载构建产物
-
-#### 本地构建
+本地构建：
 
 ```bash
-# 需要 Node.js >= 22.0.0 和 Android SDK
+# 需要 Node.js >= 22、Android SDK
 ./scripts/build-android.sh
 ```
 
-### 方式四：Docker 部署
+注意：当前 CI 使用仓库内的 `keystore/debug.keystore`（debug 签名）。若要正式分发，请改用 release keystore 并通过 GitHub Secrets 注入，不要把签名文件提交进仓库。
+
+## 方式四：Docker（静态托管）
 
 ```dockerfile
-# Dockerfile
-FROM node:22-alpine
-
-WORKDIR /app
-COPY . .
-
-RUN npm install
-RUN cd backend && pip install -r requirements.txt
-
-EXPOSE 4567
-
-CMD ["python", "backend/main.py"]
+FROM nginx:alpine
+COPY frontend/ /usr/share/nginx/html/
+EXPOSE 80
 ```
-
-## 环境变量
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `OPENWRITE_ROOT` | OpenWrite 核心代码路径 | `../Openwrite` |
-| `LLM_API_KEY` | AI 模型 API Key | 无 |
-| `LLM_BASE_URL` | 模型 API 地址 | `https://api.deepseek.com` |
-| `LLM_MODEL` | 默认模型 | `deepseek-chat` |
 
 ## 常见问题
 
-### Q: 后端启动失败？
-确保 OpenWrite 核心已安装：
-```bash
-cd /path/to/Openwrite
-pip install -e .
-```
+**Q: 首次使用要做什么？**
+进入「设置 → 模型配置」填入模型 API Key（默认 DeepSeek，任何 OpenAI 兼容接口均可），然后建议立刻到「设置 → 数据管理」做一次全量备份。
 
-### Q: 前端无法连接后端？
-检查 CORS 配置，确保前端地址在允许列表中。
+**Q: 数据存在哪里？会丢吗？**
+全部在本机 IndexedDB，不上传任何服务器。清理浏览器数据 / 卸载 App 会清空内容，请依赖「数据管理」里的导出备份功能定期备份。
 
-### Q: Capacitor 需要 Node.js 22？
-升级 Node.js：
-```bash
-# 使用 nvm
-nvm install 22
-nvm use 22
+**Q: 换机怎么迁移？**
+旧设备导出备份 JSON，新设备在「数据管理」里导入。备份文件**不包含** API Key（导出时自动脱敏），换机后需重新填写 Key。
 
-# 或下载安装包
-# https://nodejs.org/
-```
+**Q: Capacitor 需要 Node.js 22？**
+是，建议 `nvm install 22` 后使用。
 
 ## 生产环境注意事项
 
-1. **API Key 安全**：不要在代码中硬编码 API Key，使用环境变量
-2. **HTTPS**：生产环境必须使用 HTTPS
-3. **数据备份**：定期备份 `data/` 目录
-4. **模型计费**：注意控制 API 调用频率，避免高额费用
+1. **API Key 安全**：Key 仅保存在本机 IndexedDB，导出备份会自动脱敏；不要在代码或截图中暴露 Key
+2. **HTTPS**：PWA 与 Service Worker 要求 HTTPS 环境（localhost 除外）
+3. **数据备份**：提醒用户定期使用「数据管理」导出
+4. **模型计费**：AI 续写 / 审稿按调用计费，注意控制频率
