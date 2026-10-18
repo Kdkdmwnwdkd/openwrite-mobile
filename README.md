@@ -6,29 +6,31 @@
 
 ## 最新版本下载
 
-每次 push 到 `master`，GitHub Actions 会自动构建，并同步到下面几条通道。
-
-**一条永远指向最新版、且国内能跑满带宽的链接：**
+**一条链接，永远指向最新版，国内约 2 秒下完：**
 
 ```
-https://ghfast.top/https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/latest/download/app-debug.apk
+https://gh-proxy.com/https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/latest/download/app-debug.apk
 ```
 
-`releases/latest` 由 GitHub 保证指向最新 release，前面拼一个镜像域名即走加速，**发版后不用改链接**。
+`releases/latest` 由 GitHub 保证指向最新 release，前面拼镜像域名即走加速。发版后**不用改链接**。
 
 | 通道 | 地址 | 国内实测 |
 |------|------|----------|
-| **镜像 + latest（推荐）** | 见上面代码块 | 876 KB/s · 4.6s |
-| **CDN（最快）** | `https://testingcf.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk` | 1.05 MB/s · 3.9s |
-| CDN 备用 | `https://gcore.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk` | 491 KB/s |
+| **镜像 + latest（推荐）** | 见上面代码块 | 1.87 MB/s · 2.2s |
+| 备用镜像 | `https://ghfast.top/https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/latest/download/app-debug.apk` | 968 KB/s · 4.2s |
+| CDN（版本化） | `https://testingcf.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk` | 1.05 MB/s |
 | 原始（GitHub） | [app-debug.apk](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/latest/download/app-debug.apk) | 18 KB/s |
-
-> CDN 地址里的 `2.14.0` 等于 `package.json` 的 version，换版本时要改这一段。
-> 为什么不用不带版本号的 `apk/app-debug.apk`：jsDelivr 对这个路径有源站级长缓存，`purge` 清不掉，发版后仍会返回上一版——宁可链接长一点，也不能让人装到旧包。
 
 > 这是 debug 签名包（仅供测试，不适合正式分发）。当前版本号见 `package.json` / 应用「设置 → 关于」。
 
-**两条通道怎么来的**：GitHub Release 在国内直连只有十几 KB/s，4 MB 的包要等三分钟。构建完成后会自动把 APK 推到 `dist` 分支（单提交、强制覆盖，仓库不会随版本膨胀），jsDelivr 再把仓库当 CDN 用。
+### 这两条通道怎么来的
+
+GitHub Release 在国内直连只有十几 KB/s，4 MB 的包要等三分钟，手机上基本没法装。做了两件事：
+
+1. **固定指向最新版**：用 `releases/latest/download/` 而不是 `releases/download/<tag>/`，镜像前缀后面接上即可，发版不改地址。
+2. **CDN 兜底**：构建完成后自动把 APK 推到 `dist` 分支（单提交、强制覆盖，仓库不会随版本膨胀），jsDelivr 把仓库当 CDN 用，比 GitHub 快一个数量级。
+
+> 注意：CDN 那条要写带版本号的路径（`app-2.14.0.apk`）。实测 jsDelivr 对固定路径 `apk/app-debug.apk` 有源站级缓存，`purge` 也清不掉，发版后仍会返回上一版——宁可链接长一点，也不能让人装到旧包。同一版本号重复构建时它也会滞后，要绝对准确就用上面那条 `latest`。
 
 ## 功能特性
 
