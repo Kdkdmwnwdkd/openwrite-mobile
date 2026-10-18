@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.18.2',   // 与 package.json 保持一致
+    VERSION: '2.18.3',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -2382,7 +2382,11 @@ async function showWebSearch() {
         // 只有既没内置能力、也没填搜索 Key 时，才需要用户做选择。
         const picked = await resolveSearchMode();
         if (picked.mode === 'off') {
-            ui.showToast('这个模型不能联网：换通义 / 智谱 / DeepSeek，或填一个搜索 Key', 5000);
+            // 说清楚「为什么不能联网 + 怎么修」，别让人猜
+            let mc = null;
+            try { mc = await settings.getModelConfig(); } catch (e) { /* 忽略 */ }
+            const d = describeBuiltinSearch(mc || {});
+            ui.showToast(`${d.reason}：${d.fix}`, 6000);
             openResearchConfig();
             return;
         }
@@ -4740,7 +4744,7 @@ async function startWriting() {
 async function showModelConfigModal() {
     // 读取已保存的配置，预填充到弹窗
     const saved = await settings.getModelConfig();
-    const isCustom = saved.model && !['glm-5.1','glm-4.5','glm-4','deepseek-chat','deepseek-reasoner','gpt-4o','gpt-4','gpt-3.5-turbo','claude-3.5-sonnet'].includes(saved.model);
+    const isCustom = saved.model && !['glm-5.1','glm-4.5','glm-4','deepseek-chat','deepseek-reasoner','deepseek-v4-flash','gpt-4o','gpt-4','gpt-3.5-turbo','claude-3.5-sonnet'].includes(saved.model);
     const modelValue = isCustom ? 'custom' : (saved.model || 'deepseek-chat');
     const customModelValue = isCustom ? (saved.model || '') : '';
     const apiKeyValue = saved.apiKey || '';
@@ -4757,6 +4761,7 @@ async function showModelConfigModal() {
                 <option value="glm-4" ${modelValue==='glm-4'?'selected':''}>GLM-4（智谱）</option>
                 <option value="deepseek-chat" ${modelValue==='deepseek-chat'?'selected':''}>DeepSeek Chat</option>
                 <option value="deepseek-reasoner" ${modelValue==='deepseek-reasoner'?'selected':''}>DeepSeek Reasoner</option>
+                <option value="deepseek-v4-flash" ${modelValue==='deepseek-v4-flash'?'selected':''}>DeepSeek V4 Flash（可联网）</option>
                 <option value="gpt-4o" ${modelValue==='gpt-4o'?'selected':''}>GPT-4o</option>
                 <option value="gpt-4" ${modelValue==='gpt-4'?'selected':''}>GPT-4</option>
                 <option value="gpt-3.5-turbo" ${modelValue==='gpt-3.5-turbo'?'selected':''}>GPT-3.5 Turbo</option>

@@ -83,15 +83,20 @@ async function setResearchConfig(cfg) {
 }
 
 // 模型内置联网：按 baseUrl / model 识别厂商，返回要合并进请求体的字段
-// 识别不出来的厂家一律返回 null，宁可明确报错，也不发一个可能 400 的请求
+// 识别不出来的厂家一律返回 null，宁可明确报错，也不发一个可能 400 的请求。
+// 注意：DeepSeek 的服务端搜索只挂在 v4-flash 上，chat / reasoner 带这个工具会被 400 拒掉，
+// 所以只有模型名里带 v4 才放行——不能因为"是 DeepSeek"就声称能联网，
+// 更不允许偷偷把用户配的 chat 换成 v4-flash（用户没配过那个模型，账号也不一定开通）。
 function buildBuiltinSearchPayload(config) {
-    const url = String(config.baseUrl || '').toLowerCase();
-    const model = String(config.model || '').toLowerCase();
+    const url = String((config && config.baseUrl) || '').toLowerCase();
+    const model = String((config && config.model) || '').toLowerCase();
     if (url.includes('dashscope') || model.startsWith('qwen')) return { enable_search: true };
     if (url.includes('bigmodel') || model.startsWith('glm')) return { tools: [{ type: 'web_search' }] };
     // DeepSeek 的服务端搜索只存在于 Responses 端点（/responses），
     // chat/completions 带这个工具会被 400 拒掉，所以单独走一条路，见 deepseekWebSearch
-    if (url.includes('deepseek') || model.startsWith('deepseek')) return { __responses: true };
+    if (url.includes('deepseek') || model.startsWith('deepseek')) {
+        return /v4/i.test(model) ? { __responses: true } : null;
+    }
     return null;
 }
 
@@ -103,6 +108,26 @@ async function currentModelSupportsBuiltin() {
     } catch (e) {
         return false;
     }
+}
+
+// 告诉上层「这个模型为什么不能联网、该怎么修」。
+// 开联网按钮时用它给出可操作的提示，而不是一句"换模型"让人猜。
+function describeBuiltinSearch(config) {
+    if (buildBuiltinSearchPayload(config)) return { ok: true };
+    const model = String((config && config.model) || '').toLowerCase();
+    const url = String((config && config.baseUrl) || '').toLowerCase();
+    if (model.startsWith('deepseek') || url.includes('deepseek')) {
+        return {
+            ok: false,
+            reason: `DeepSeek 只有 deepseek-v4-flash 带联网搜索，你配的是「${(config && config.model) || '未设置'}」`,
+            fix: '去模型设置换成 deepseek-v4-flash，或在查资料配置里填一个搜索 Key'
+        };
+    }
+    return {
+        ok: false,
+        reason: '当前模型没有内置联网能力',
+        fix: '换通义 / 智谱（GLM）/ deepseek-v4-flash，或填一个搜索 Key'
+    };
 }
 
 // 决定这次搜索走哪条路：
@@ -118,15 +143,19 @@ async function resolveSearchMode() {
 
 // DeepSeek 的联网搜索：一次请求内完成 search → open_page → 回答。
 // 结果不可见（服务端注入），但 open_page 的 URL 会回传，可以当来源。
+// 直接用用户配置的模型，不偷换：能走到这里说明模型名带 v4（见 buildBuiltinSearchPayload），
+// 若配置被改坏，宁可明确报错，也不静默换成另一个模型。
 async function deepseekWebSearch(query) {
     const mc = await settings.getModelConfig();
     if (!mc || !mc.apiKey) throw new Error('还没配置模型 Key');
 
+    const model = String(mc.model || '');
+    if (!/v4/i.test(model)) {
+        throw new Error(`DeepSeek 的联网搜索只支持 deepseek-v4-flash，当前配的是「${model || '未设置'}」，请到模型设置里切换`);
+    }
+
     let base = String(mc.baseUrl || 'https://api.deepseek.com').replace(/\/+$/, '');
     if (base.endsWith('/v1')) base = base.slice(0, -3);
-
-    // 搜索能力只挂在 v4-flash 上；用户配的若是别的模型，仍按 v4-flash 请求
-    const model = /v4/i.test(mc.model || '') ? mc.model : 'deepseek-v4-flash';
 
     const res = await fetch(`${base}/responses`, {
         method: 'POST',
