@@ -1,5 +1,5 @@
 // OpenWrite Mobile Service Worker
-const CACHE_NAME = 'openwrite-mobile-v9';
+const CACHE_NAME = 'openwrite-mobile-v10';
 const STATIC_ASSETS = [
     '/',
     '/index.html',

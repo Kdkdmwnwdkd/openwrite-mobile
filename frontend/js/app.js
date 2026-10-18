@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.12.0',   // 与 package.json 保持一致
+    VERSION: '2.13.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -724,6 +724,35 @@ ${recent.slice(0, 4000)}
         ], null, 2500);
     },
 
+    // 章末钩子检查：只看每章结尾几百字。
+    // 不预测"追读率"（那是平台后台的数据，本地拿不到），只判断"这一段能不能让人点下一章"。
+    async hookCheck(items) {
+        if (!items || !items.length) return [];
+        const list = items.map(it =>
+            `【第${it.number}章${it.title ? ' ' + it.title : ''}】\n${it.tail}`
+        ).join('\n\n---\n\n');
+
+        const prompt = `下面是若干章小说的【结尾片段】。读者决定要不要点下一章，就看这几百字。
+
+${list}
+
+请逐章判断这个结尾能不能让人非点下一章不可，对每一章输出一个对象：
+- "chapter": 章节号（数字）
+- "score": 0-10 的整数，10 = 强烈想知道后面发生了什么，3 以下 = 这段结尾可以直接合上 App
+- "type": 悬念 / 反转 / 危机 / 情绪 / 信息缺口 / 平淡
+- "problem": 一句话说清问题；score >= 7 时写 "无"
+- "fix": 一句话给出可执行的改法（加一句什么、删哪句、把哪个信息提前或押后），要具体到能照做
+
+只输出 JSON 数组，不要解释，不要 markdown 代码块。`;
+
+        const text = await this.chat([
+            { role: 'system', content: '你是资深网文编辑，专看章节结尾的钩子。判断狠、建议具体，不说套话。' },
+            { role: 'user', content: prompt }
+        ], null, 3000);
+
+        return parseHookJson(text, items);
+    },
+
     async reviewChapter(chapterContent, novelInfo, chapterNum) {
         const charContext = chapterNum ? await buildCharacterContext(novelInfo.id, chapterNum) : '';
         const wbContext = chapterNum ? await buildWorldbuildingContext(novelInfo.id) : '';
@@ -903,6 +932,7 @@ const novelManager = {
             updated: Date.now()
         };
         if (existing && existing.summary) chapter.summary = existing.summary;
+        if (existing && existing.hook) chapter.hook = existing.hook;
         if (paragraphs !== null) {
             chapter.paragraphs = paragraphs;
         }
@@ -2338,6 +2368,7 @@ async function renderNovelDetail(container, novelId) {
             </div>
             <div class="action-buttons-row" style="margin-bottom: 12px;">
                 <button class="btn btn-outline" onclick="showReaderAuditModal('${novelId}')">📈 读者体检</button>
+                <button class="btn btn-outline" onclick="scanChapterHooks('${novelId}')">🪝 钩子扫描</button>
                 <button class="btn btn-outline" onclick="navigateTo('foreshadowing', { novelId: '${novelId}' })">🧵 伏笔追踪</button>
             </div>
 
@@ -2682,6 +2713,155 @@ async function saveChapterOrder(novelId) {
     }
 }
 
+// ===== 章末钩子检查（v2.13.0）=====
+// 只判断「这一段能不能让人点下一章」，不预测追读率——后者是平台后台的数据，本地没有。
+
+function hookTail(content, len = 280) {
+    const t = String(content || '').replace(/\r/g, '').trim();
+    if (t.length <= len) return t;
+    const cut = t.slice(-len);
+    // 尽量从句子开头截，别把半句话喂给 AI
+    const m = cut.match(/[。！？…\n]/);
+    return m ? cut.slice(m.index + 1).trim() || cut : cut;
+}
+
+function parseHookJson(text, items) {
+    let s = String(text || '').trim();
+    s = s.replace(/^```(?:json)?/i, '').replace(/```\s*$/, '').trim();
+    const a = s.indexOf('[');
+    const b = s.lastIndexOf(']');
+    let arr = [];
+    if (a >= 0 && b > a) {
+        try { arr = JSON.parse(s.slice(a, b + 1)); } catch (e) { arr = []; }
+    }
+    if (!Array.isArray(arr)) arr = [];
+
+    const valid = new Set((items || []).map(it => Number(it.number)));
+    return arr.map(r => ({
+        chapter: Number(r.chapter),
+        score: Math.max(0, Math.min(10, Math.round(Number(r.score) || 0))),
+        type: String(r.type || '未知').slice(0, 12),
+        problem: String(r.problem || '').slice(0, 120),
+        fix: String(r.fix || '').slice(0, 160)
+    }))
+        .filter(r => valid.has(r.chapter))
+        .sort((x, y) => x.chapter - y.chapter);
+}
+
+async function checkChapterHook(novelId, chapterNum) {
+    const ch = await novelManager.getChapter(novelId, chapterNum);
+    const ta = document.getElementById('chapter-content');
+    const content = ta ? ta.value : (ch && ch.content);
+    if (!content || !content.trim()) { ui.showToast('这一章还没有正文'); return; }
+
+    ui.showToast('正在看章末…');
+    try {
+        const rows = await ai.hookCheck([{
+            number: chapterNum,
+            title: (ch && ch.title || '').replace(/^第\d+章\s*/, ''),
+            tail: hookTail(content)
+        }]);
+        if (!rows.length) { ui.showToast('没解析出结果，再试一次'); return; }
+
+        const r = Object.assign({}, rows[0], { title: (ch && ch.title || '').replace(/^第\d+章\s*/, ''), at: Date.now() });
+        if (ch) { ch.hook = r; await db.put('chapters', ch); }
+        showHookModal(novelId, [r], '第' + chapterNum + '章');
+    } catch (e) {
+        ui.showToast('检查失败：' + e.message, 4000);
+    }
+}
+
+// 一次扫最近 30 章：更早的章节对"留人"影响已经很小，没必要为它烧 token
+async function scanChapterHooks(novelId) {
+    const all = (await novelManager.listChapters(novelId)).sort((a, b) => a.number - b.number);
+    if (!all.length) { ui.showToast('还没有章节'); return; }
+    const target = all.slice(-30);
+
+    const rows = [];
+    const CHUNK = 10;
+    for (let i = 0; i < target.length; i += CHUNK) {
+        const slice = target.slice(i, i + CHUNK);
+        ui.showToast(`检查 ${i + 1}-${Math.min(i + CHUNK, target.length)} / ${target.length}…`, 2500);
+        try {
+            const got = await ai.hookCheck(slice.map(c => ({
+                number: c.number,
+                title: (c.title || '').replace(/^第\d+章\s*/, ''),
+                tail: hookTail(c.content)
+            })));
+            got.forEach(r => {
+                const c = slice.find(x => x.number === r.chapter);
+                rows.push(Object.assign({}, r, { title: (c && c.title || '').replace(/^第\d+章\s*/, ''), at: Date.now() }));
+            });
+        } catch (e) {
+            ui.showToast('第 ' + slice[0].number + ' 章起检查失败：' + e.message, 4000);
+            break;
+        }
+    }
+
+    if (!rows.length) { ui.showToast('没有拿到结果'); return; }
+
+    for (const r of rows) {
+        const c = all.find(x => x.number === r.chapter);
+        if (c) { c.hook = r; await db.put('chapters', c); }
+    }
+    showHookModal(novelId, rows, `最近 ${target.length} 章`);
+}
+
+function hookTone(score) {
+    if (score >= 7) return 'good';
+    if (score >= 4) return 'mid';
+    return 'bad';
+}
+
+function showHookModal(novelId, rows, label) {
+    const list = rows.slice().sort((a, b) => a.score - b.score);
+    const avg = (rows.reduce((s, r) => s + r.score, 0) / rows.length).toFixed(1);
+    const weak = rows.filter(r => r.score < 4).length;
+
+    if (rows.length === 1) {
+        const r = rows[0];
+        createModal(`🪝 ${label} · 章末钩子`, `
+            <div class="hook-single">
+                <div class="hook-score ${hookTone(r.score)}">${r.score}<span>/10</span></div>
+                <div class="hook-type">类型：${escapeHtml(r.type)}</div>
+                <div class="hook-block">
+                    <div class="hook-lb">问题</div>
+                    <div class="hook-txt">${escapeHtml(r.problem || '无')}</div>
+                </div>
+                <div class="hook-block">
+                    <div class="hook-lb">怎么改</div>
+                    <div class="hook-txt">${escapeHtml(r.fix || '暂无建议')}</div>
+                </div>
+                <div class="hook-note">只看这一章结尾的最后 280 字。这是编辑视角的判断，不是平台的真实追读数据。</div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" onclick="closeModal()">知道了</button>
+                <button class="btn btn-primary" onclick="closeModal();checkChapterHook('${novelId}', ${r.chapter})">重新检查</button>
+            </div>`).show();
+        return;
+    }
+
+    createModal(`🪝 ${label} · 章末钩子`, `
+        <div class="hook-summary">
+            <div><b>${avg}</b><span>平均分</span></div>
+            <div><b>${weak}</b><span>4 分以下</span></div>
+            <div><b>${rows.length}</b><span>已检查</span></div>
+        </div>
+        <div class="hook-list">
+            ${list.map(r => `
+                <div class="hook-row" onclick="closeModal(); navigateTo('chapterEdit', { novelId: '${novelId}', chapterNum: ${r.chapter} })">
+                    <span class="hook-score-sm ${hookTone(r.score)}">${r.score}</span>
+                    <div class="hook-row-main">
+                        <div class="hook-row-title">第${r.chapter}章 ${escapeHtml(r.title || '')}</div>
+                        <div class="hook-row-sub">${escapeHtml(r.type)} · ${escapeHtml(r.problem || '无')}</div>
+                    </div>
+                    <span class="hook-row-arrow">›</span>
+                </div>`).join('')}
+        </div>
+        <div class="hook-note">按分数从低到高排。分数低的是"读者可能在这里合上 App"的地方，点进去能直接改。</div>
+    `).show();
+}
+
 // ===== Chapter Edit Page =====
 async function renderChapterEdit(container, novelId, chapterNum) {
     const novel = await novelManager.get(novelId);
@@ -2737,6 +2917,7 @@ async function renderChapterEdit(container, novelId, chapterNum) {
             <button class="btn btn-outline" onclick="showChapterHistory('${novelId}', ${chapterNum})">🕘 历史版本</button>
             <button class="btn btn-outline" onclick="showResearchSheet('${novelId}')">🔎 查资料</button>
             <button class="btn btn-outline" onclick="navigateTo('listen', { novelId: '${novelId}', chapterNum: ${chapterNum} })">🎧 听稿</button>
+            <button class="btn btn-outline" onclick="checkChapterHook('${novelId}', ${chapterNum})">🪝 章末钩子</button>
         </div>
     `;
 

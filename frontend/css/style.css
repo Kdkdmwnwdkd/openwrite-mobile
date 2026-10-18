@@ -4493,3 +4493,32 @@ html, body {
     border-radius: 8px; font-size: 14px; cursor: pointer;
 }
 .sort-btn:disabled { opacity: .35; }
+
+/* ===== 章末钩子检查 ===== */
+.hook-single { text-align: center; }
+.hook-score { font-size: 44px; font-weight: 700; line-height: 1.1; margin: 6px 0 2px; }
+.hook-score span { font-size: 15px; font-weight: 400; color: #aaa; margin-left: 2px; }
+.hook-score.good { color: #2f6448; }
+.hook-score.mid { color: #8a6114; }
+.hook-score.bad { color: #a63a24; }
+.hook-type { font-size: 13px; color: #8b8b8b; margin-bottom: 16px; }
+.hook-block { text-align: left; background: #faf9f6; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+.hook-lb { font-size: 11px; color: #9a9a9a; letter-spacing: .06em; margin-bottom: 4px; }
+.hook-txt { font-size: 14px; line-height: 1.75; color: #333; }
+.hook-note { font-size: 11.5px; color: #a0a0a0; line-height: 1.7; margin-top: 12px; text-align: left; }
+
+.hook-summary { display: flex; gap: 8px; margin-bottom: 14px; }
+.hook-summary > div { flex: 1; background: #faf9f6; border-radius: 10px; padding: 10px; text-align: center; }
+.hook-summary b { display: block; font-size: 20px; line-height: 1.25; }
+.hook-summary span { font-size: 11px; color: #9a9a9a; }
+
+.hook-list { display: flex; flex-direction: column; gap: 6px; max-height: 56vh; overflow-y: auto; }
+.hook-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #eee; border-radius: 10px; background: #fff; cursor: pointer; }
+.hook-score-sm { width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex: none; }
+.hook-score-sm.good { background: #e7efe9; color: #2f6448; }
+.hook-score-sm.mid { background: #f8efdc; color: #8a6114; }
+.hook-score-sm.bad { background: #f7e8e2; color: #a63a24; }
+.hook-row-main { flex: 1; min-width: 0; }
+.hook-row-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hook-row-sub { font-size: 11.5px; color: #999; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hook-row-arrow { color: #ccc; }
