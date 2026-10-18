@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.8.0',
+    VERSION: '2.10.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -841,7 +841,21 @@ const novelManager = {
         const chapters = await this.listChapters(novelId);
         for (const ch of chapters) {
             await db.delete('chapters', ch.id);
+            const versions = await this.listChapterVersions(novelId, ch.number);
+            for (const v of versions) await db.delete('versions', v.id);
         }
+        // 角色 / 世界观 / 参考资料 / 审稿记录都要一起清，否则删了书空间也不释放
+        const characters = await db.getAll('characters', 'novelId', novelId);
+        for (const c of characters) await db.delete('characters', c.id);
+
+        const wbs = await db.getAll('worldbuilding', 'novelId', novelId);
+        for (const w of wbs) await db.delete('worldbuilding', w.id);
+
+        const reviews = await db.getAll('reviews');
+        for (const r of reviews) {
+            if (r && r.novelId === novelId) await db.delete('reviews', r.id);
+        }
+
         await db.delete('novels', novelId);
     },
 
@@ -1215,6 +1229,7 @@ const ui = {
 
 // ===== Page Navigation =====
 let pageHistory = [];
+let __suppressHistoryPush = false;   // 返回操作本身不再入栈
 
 function navigateTo(page, params = {}, isRootTab = false) {
     // 离开编辑器前先把未落盘的内容存下来（只触发一次，随后清空引用）
@@ -1224,13 +1239,16 @@ function navigateTo(page, params = {}, isRootTab = false) {
         try { f(); } catch (e) { /* 保存失败已在界面上提示 */ }
     }
 
-    if (!isRootTab) {
-        pageHistory.push({ page: store.currentPage, params: {} });
-    } else {
+    if (!isRootTab && !__suppressHistoryPush) {
+        // 连参数一起存，否则返回详情页会丢 novelId 变成白屏
+        pageHistory.push({ page: store.currentPage, params: store.currentParams || {} });
+    } else if (isRootTab) {
         pageHistory = [];
     }
-    
+    __suppressHistoryPush = false;
+
     store.currentPage = page;
+    store.currentParams = params;
     document.querySelectorAll('.nav-item').forEach(item => {
         item.classList.toggle('active', item.dataset.page === page);
     });
@@ -1578,8 +1596,10 @@ async function sendMessage() {
 
         // 保存消息（去掉设定块，保留干净正文）
         try {
-            await db.put('messages', { sessionId: 'main', role: 'user', content: text, created: Date.now() });
-            await db.put('messages', { sessionId: 'main', role: 'assistant', content: finalParsed.clean, created: Date.now() });
+            // 之前硬编码 'main'，导致「新对话」建出来的会话永远没有消息，抽屉里只剩一个
+            const sid = store.currentSessionId || 'main';
+            await db.put('messages', { sessionId: sid, role: 'user', content: text, created: Date.now() });
+            await db.put('messages', { sessionId: sid, role: 'assistant', content: finalParsed.clean, created: Date.now() });
         } catch (e) { /* ignore */ }
     } catch (err) {
         aiLoading.innerHTML = `<div class="msg-bubble ai error">⚠️ ${escapeHtml(err.message)}</div>`;
@@ -2818,19 +2838,12 @@ async function exportAllData() {
         if (btn) { btn.disabled = true; btn.textContent = '导出中…'; }
         const data = await db.exportAll();
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
         const d = new Date();
         const pad = (n) => String(n).padStart(2, '0');
         const filename = `openwrite-backup-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(url), 3000);
+        const mode = await exportDownloadBlob(blob, filename);
         await settings.set('lastBackupAt', Date.now());
-        ui.showToast('备份文件已导出');
+        ui.showToast(mode === 'shared' ? '备份已生成，选择「保存到文件」即可' : '备份文件已导出');
     } catch (e) {
         ui.showToast('导出失败: ' + e.message);
     } finally {
@@ -3727,6 +3740,8 @@ if ('serviceWorker' in navigator) {
 // ===== Global Store =====
 const store = {
     currentPage: 'chat',
+    currentParams: {},          // 当前页面参数，供返回时还原
+    currentSessionId: 'main',   // 对话会话 id（老数据都在 main 下）
     currentNovel: null,
     currentChapter: null,
     novels: [],
@@ -3779,6 +3794,42 @@ function showTutorialModal() {
     modal.show();
 }
 
+// ===== 返回 / 原生壳 =====
+const ROOT_PAGES = ['chat', 'bookshelf', 'settings'];
+
+function goBack(fallback = 'bookshelf') {
+    const prev = pageHistory.pop();
+    if (!prev || !prev.page) {
+        if (store.currentPage !== fallback) navigateTo(fallback, {}, true);
+        return;
+    }
+    const isRoot = ROOT_PAGES.includes(prev.page);
+    __suppressHistoryPush = !isRoot;
+    navigateTo(prev.page, prev.params || {}, isRoot);
+}
+
+function initNativeShell() {
+    const C = window.Capacitor;
+    if (!C || typeof C.isNativePlatform !== 'function' || !C.isNativePlatform()) return;
+    const P = C.Plugins || {};
+
+    // 页面已经渲染完，收掉启动图（之前配置无效，因为插件根本没装）
+    if (P.SplashScreen) { try { P.SplashScreen.hide(); } catch (e) { /* 忽略 */ } }
+    if (P.StatusBar) { try { P.StatusBar.setStyle({ style: 'LIGHT' }); } catch (e) { /* 忽略 */ } }
+
+    // 安卓返回键：原来没接管，在章节页按返回会直接退出整个 App
+    if (P.App) {
+        P.App.addListener('backButton', () => {
+            if (document.querySelector('.modal-overlay')) { closeModal(); return; }
+            const drawer = document.getElementById('chat-drawer');
+            if (drawer && drawer.classList.contains('active')) { closeChatDrawer(); return; }
+            if (pageHistory.length) { goBack(); return; }
+            if (!ROOT_PAGES.includes(store.currentPage)) { goBack('bookshelf'); return; }
+            P.App.exitApp();
+        });
+    }
+}
+
 // ===== Init =====
 document.addEventListener('DOMContentLoaded', async () => {
     // Initialize IndexedDB on first run
@@ -3802,6 +3853,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Default to chat page (matching competitor)
     navigateTo('chat');
+
+    // 原生壳能力：启动图、状态栏、返回键（网页环境自动跳过）
+    initNativeShell();
 });
 
 // Prevent double-tap zoom

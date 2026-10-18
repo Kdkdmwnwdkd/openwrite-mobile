@@ -38,8 +38,15 @@ jobs:
       - name: Install Capacitor CLI
         run: npm install -g @capacitor/cli
 
+      - name: Syntax check
+        run: |
+          for f in frontend/js/*.js; do
+            echo "checking $f"
+            node --check "$f"
+          done
+
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Add Android platform
         run: |

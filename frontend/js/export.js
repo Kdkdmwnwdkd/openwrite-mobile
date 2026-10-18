@@ -105,8 +105,52 @@ function zipStoreFiles(files) {
     return new Blob(all, { type: 'application/zip' });
 }
 
-// ===== 通用下载 =====
-function exportDownloadBlob(blob, filename) {
+// ===== 通用导出：原生走系统分享，网页走下载 =====
+// Android WebView 没有 DownloadListener，<a download> + blob 点了没反应，
+// 所以在 APK 里必须先把文件写到缓存目录，再调系统分享让用户选「保存到文件」。
+function isNativeApp() {
+    const C = window.Capacitor;
+    return !!(C && typeof C.isNativePlatform === 'function' && C.isNativePlatform());
+}
+
+function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => {
+            const s = String(fr.result || '');
+            resolve(s.slice(s.indexOf(',') + 1));
+        };
+        fr.onerror = () => reject(fr.error || new Error('读取文件失败'));
+        fr.readAsDataURL(blob);
+    });
+}
+
+async function shareNativeFile(blob, filename) {
+    const C = window.Capacitor;
+    const Fs = C.Plugins && C.Plugins.Filesystem;
+    const Share = C.Plugins && C.Plugins.Share;
+    if (!Fs || !Share) return false;
+    try {
+        const data = await blobToBase64(blob);
+        const written = await Fs.writeFile({
+            path: filename,
+            data,
+            directory: 'CACHE',
+            encoding: 'base64'
+        });
+        await Share.share({ title: filename, files: [written.uri] });
+        return true;
+    } catch (e) {
+        console.warn('原生分享失败，回退到下载', e);
+        return false;
+    }
+}
+
+async function exportDownloadBlob(blob, filename) {
+    if (isNativeApp()) {
+        const ok = await shareNativeFile(blob, filename);
+        if (ok) return 'shared';
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -117,6 +161,7 @@ function exportDownloadBlob(blob, filename) {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
     }, 800);
+    return 'downloaded';
 }
 
 function exportSafeName(name) {
@@ -216,8 +261,8 @@ async function exportNovelMarkdown(novelId) {
         });
 
         const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
-        exportDownloadBlob(blob, `${exportSafeName(novel.title)}.md`);
-        ui.showToast('Markdown 已导出');
+        const mode = await exportDownloadBlob(blob, `${exportSafeName(novel.title)}.md`);
+        ui.showToast(mode === 'shared' ? '已生成，选择「保存到文件」即可' : 'Markdown 已导出');
     } catch (e) {
         ui.showToast('导出失败: ' + e.message);
     }
@@ -249,8 +294,8 @@ async function exportNovelSerial(novelId) {
         });
 
         const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
-        exportDownloadBlob(blob, `${exportSafeName(novel.title)}_连载.txt`);
-        ui.showToast('连载格式已导出');
+        const mode = await exportDownloadBlob(blob, `${exportSafeName(novel.title)}_连载.txt`);
+        ui.showToast(mode === 'shared' ? '已生成，选择「保存到文件」即可' : '连载格式已导出');
     } catch (e) {
         ui.showToast('导出失败: ' + e.message);
     }
@@ -382,8 +427,8 @@ p { text-indent: 2em; margin: 0.6em 0; }
 
         const zipBlob = zipStoreFiles(files);
         const epubBlob = new Blob([zipBlob], { type: 'application/epub+zip' });
-        exportDownloadBlob(epubBlob, `${exportSafeName(title)}.epub`);
-        ui.showToast('EPUB 已导出');
+        const mode = await exportDownloadBlob(epubBlob, `${exportSafeName(title)}.epub`);
+        ui.showToast(mode === 'shared' ? '已生成，选择「保存到文件」即可' : 'EPUB 已导出');
     } catch (e) {
         ui.showToast('EPUB 导出失败: ' + e.message);
     }

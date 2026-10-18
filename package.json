@@ -1,6 +1,6 @@
 {
     "name": "openwrite-mobile",
-    "version": "2.9.0",
+    "version": "2.10.0",
     "description": "OpenWrite AI Novel Writing Assistant - Mobile Edition",
     "main": "index.js",
     "scripts": {
@@ -20,8 +20,13 @@
     },
     "dependencies": {
         "@capacitor/android": "^6.0.0",
+        "@capacitor/app": "^6.0.3",
         "@capacitor/core": "^6.0.0",
-        "@capacitor/ios": "^6.0.0"
+        "@capacitor/filesystem": "^6.0.4",
+        "@capacitor/ios": "^6.0.0",
+        "@capacitor/share": "^6.0.4",
+        "@capacitor/splash-screen": "^6.0.4",
+        "@capacitor/status-bar": "^6.0.3"
     },
     "devDependencies": {
         "@capacitor/cli": "^6.0.0"
