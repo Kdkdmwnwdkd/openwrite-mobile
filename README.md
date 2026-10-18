@@ -42,6 +42,7 @@
 - 拆书：粘贴/导入原文，AI 拆解题材卖点、开篇钩子、结构节奏、可借鉴技巧，可转成自己的大纲笔记
 - 数据管理：全量备份 / 恢复、导入导出
 - 导出：Markdown / EPUB / 网络连载 TXT
+- **查资料**：写历史、职业、地理时联网检索，结果带来源链接，可勾选存入作品「参考资料」，写作时按关键词自动注入上下文。两种模式：模型内置联网（通义 / 智谱，无需另配 Key）、搜索 API（博查 / Serper / Tavily，自带 Key，结果可沉淀）
 
 **写作质量相关（v2.9.0）**
 
@@ -94,6 +95,7 @@ openwrite-mobile/
 │   ├── js/skills.js   # 技能定义
 │   ├── js/distill.js  # 文风蒸馏
 │   ├── js/export.js   # 导出（markdown / zip 打包）
+│   ├── js/research.js # 查资料（联网检索 → 资料库 → 上下文注入）
 │   ├── images/        # PWA 图标
 │   ├── sw.js          # Service Worker（离线缓存）
 │   └── manifest.json

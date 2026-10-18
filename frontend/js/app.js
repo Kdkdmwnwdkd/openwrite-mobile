@@ -357,8 +357,12 @@ async function buildLayeredContext(novelId, chapterNum, hintText = '') {
     }
 
     // 6) 世界观：关键词命中优先
+    // 注意：查资料沉淀的条目也存在 worldbuilding 里（category=research），
+    // 这里必须排除，否则会被当成「设定」注入，语气和权重都不对。
     let wbItems = [];
     try { wbItems = await novelManager.listWorldbuilding(novelId); } catch (e) { wbItems = []; }
+    const researchItems = wbItems.filter(w => w && w.category === 'research');
+    wbItems = wbItems.filter(w => w && w.category !== 'research');
     if (wbItems.length) {
         const matched = wbItems.filter(w => (w.title && refText.includes(w.title)) ||
             (Array.isArray(w.keywords) && w.keywords.some(k => k && refText.includes(k))));
@@ -367,6 +371,21 @@ async function buildLayeredContext(novelId, chapterNum, hintText = '') {
             `- ${w.title}：${clipText(w.content || w.description || '', 400)}`
         ).join('\n'));
         stats.worldbuilding = chosen.length;
+    }
+
+    // 7) 参考资料：只注入本章真正提到的（查资料的成果）
+    // 不做「兜底塞前几条」——无关资料塞进去只会干扰正文。
+    if (researchItems.length) {
+        const hitRefs = researchItems.filter(r => {
+            const keys = Array.isArray(r.keywords) ? r.keywords : [];
+            return (r.title && refText.includes(r.title)) ||
+                keys.some(k => k && k.length >= 2 && refText.includes(k));
+        }).slice(0, 4);
+        if (hitRefs.length) {
+            parts.push('【参考资料（事实性依据，写到相关情节以这里为准，不要自行编造）】\n' +
+                hitRefs.map((r, i) => `[${i + 1}] ${r.title}\n${clipText(r.content || '', 300)}`).join('\n'));
+            stats.research = hitRefs.length;
+        }
     }
 
     let text = parts.join('\n\n');
@@ -379,7 +398,9 @@ async function buildLayeredContext(novelId, chapterNum, hintText = '') {
 
 // ===== AI API Client =====
 const ai = {
-    async chat(messages, onStream = null, maxTokens = null, signal = null) {
+    // opts.searchPayload：由「查资料」模块传入的服务端联网参数（如 enable_search / tools），
+    // 不属于 OpenAI 标准字段，只有显式开启联网时才合并进去，避免影响普通请求。
+    async chat(messages, onStream = null, maxTokens = null, signal = null, opts = {}) {
         const config = await settings.getModelConfig();
         if (!config.apiKey) {
             throw new Error('请先配置 API Key');
@@ -422,6 +443,7 @@ const ai = {
             temperature: runConfig.temperature,
             max_tokens: maxTokens || runConfig.maxOutput
         };
+        if (opts && opts.searchPayload) Object.assign(body, opts.searchPayload);
 
         const response = await fetch(url, {
             method: 'POST',
@@ -1193,6 +1215,8 @@ function navigateTo(page, params = {}, isRootTab = false) {
         paramConfig: renderParamConfig,
         // 数据管理
         dataManage: renderDataManage,
+        // 查资料（联网检索 → 资料库 → 写作上下文）
+        research: renderResearch,
         // 大纲编辑器
         outlineEditor: (view) => renderOutlineEditor(view, params.novelId),
         // 情节推演
@@ -2170,6 +2194,7 @@ async function renderChapterEdit(container, novelId, chapterNum) {
         <div class="action-buttons-row" style="margin-top: 8px;">
             <button class="btn btn-outline" onclick="generateChapterSummary('${novelId}', ${chapterNum})">📝 生成摘要</button>
             <button class="btn btn-outline" onclick="showChapterHistory('${novelId}', ${chapterNum})">🕘 历史版本</button>
+            <button class="btn btn-outline" onclick="showResearchSheet('${novelId}')">🔎 查资料</button>
         </div>
     `;
 }
@@ -2448,6 +2473,16 @@ async function renderSettings(container) {
                     <div>
                         <div class="settings-label">参数配置</div>
                         <div class="settings-value">温度、上下文窗口、系统提示词</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+            <div class="settings-item" onclick="navigateTo('research')">
+                <div class="settings-item-left">
+                    <div class="settings-icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></div>
+                    <div>
+                        <div class="settings-label">查资料</div>
+                        <div class="settings-value">联网检索，结果可沉淀进作品资料库</div>
                     </div>
                 </div>
                 <span class="settings-arrow">›</span>
@@ -5179,6 +5214,7 @@ const WB_CATEGORIES = [
     { key: 'faction', icon: '⚔️', label: '势力与组织' },
     { key: 'timeline', icon: '⏳', label: '时间线与历史' },
     { key: 'rule', icon: '📜', label: '规则与法则' },
+    { key: 'research', icon: '🔎', label: '参考资料' },
     { key: 'other', icon: '📦', label: '其他设定' }
 ];
 
