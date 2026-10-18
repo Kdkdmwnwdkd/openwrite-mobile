@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.16.1',   // 与 package.json 保持一致
+    VERSION: '2.16.2',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -73,7 +73,11 @@ const db = {
         });
     },
 
+    // 主键为空时 IndexedDB 会直接抛 "No key or key range specified"，
+    // 而调用方多半是「参数没传全」（比如从深链接进听稿页），
+    // 结果就是整页白屏 + 一条看不懂的报错。这里统一按"没找到"处理。
     async get(store, key) {
+        if (key === undefined || key === null || key === '') return null;
         const database = await this.open();
         return new Promise((resolve, reject) => {
             const tx = database.transaction(store, 'readonly');
@@ -98,6 +102,7 @@ const db = {
     },
 
     async put(store, value) {
+        if (!value || typeof value !== 'object') throw new Error('写入数据不合法');
         const database = await this.open();
         return new Promise((resolve, reject) => {
             const tx = database.transaction(store, 'readwrite');
@@ -109,6 +114,7 @@ const db = {
     },
 
     async delete(store, key) {
+        if (key === undefined || key === null || key === '') return;
         const database = await this.open();
         return new Promise((resolve, reject) => {
             const tx = database.transaction(store, 'readwrite');
@@ -7481,7 +7487,7 @@ async function agentRun() {
     if (!userText) { ui.showToast('请输入任务内容'); return; }
 
     const outputBox = document.getElementById('agent-output');
-    outputBox.innerHTML = `<div class="agent-output-loading"><div class="spinner"></div><div>${def.icon} ${def.name} 正在思考…</div></div>`;
+    outputBox.innerHTML = `<div class="agent-output-loading"><div class="spinner"></div><div>${def.icon} ${escapeHtml(def.name)} 正在思考…</div></div>`;
     try {
         const messages = [{ role: 'system', content: def.systemPrompt }];
         const ctx = agentSession.getContextFor(def.key);

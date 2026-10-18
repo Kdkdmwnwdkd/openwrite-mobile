@@ -105,6 +105,24 @@ function zipStoreFiles(files) {
     return new Blob(all, { type: 'application/zip' });
 }
 
+// 章节标题本身常写成「第1章 夜审」，再前缀一次就成了「第1章 第1章 夜审」
+function exportChapterHeading(ch) {
+    const raw = String((ch && ch.title) || '').trim();
+    const m = raw.match(/^第\s*[0-9一二三四五六七八九十百千]+\s*章\s*/);
+    if (m) return raw;
+    return `第${ch.number}章${raw ? ' ' + raw : ''}`;
+}
+
+function exportSplitParagraphs(text) {
+    const t = String(text || '').replace(/\r\n?/g, '\n').trim();
+    if (!t) return [];
+    // 一个换行 = 一段。空行产生的空串最后统一过滤掉。
+    // 之前"有连续空行就整章按空行切"，导致单换行写的那几段被并成一大坨。
+    return t.split(/\n+/)
+        .map(p => p.trim())
+        .filter(Boolean);
+}
+
 // ===== 通用导出：原生走系统分享，网页走下载 =====
 // Android WebView 没有 DownloadListener，<a download> + blob 点了没反应，
 // 所以在 APK 里必须先把文件写到缓存目录，再调系统分享让用户选「保存到文件」。
@@ -254,7 +272,7 @@ async function exportNovelMarkdown(novelId) {
         lines.push('');
 
         chapters.forEach(ch => {
-            lines.push(`## 第${ch.number}章 ${ch.title || ''}`);
+            lines.push(`## ${exportChapterHeading(ch)}`);
             lines.push('');
             lines.push((ch.content || '').trim());
             lines.push('');
@@ -286,7 +304,7 @@ async function exportNovelSerial(novelId) {
         lines.push('');
 
         chapters.forEach(ch => {
-            lines.push(`第${ch.number}章 ${ch.title || ''}`);
+            lines.push(exportChapterHeading(ch));
             lines.push('');
             lines.push((ch.content || '').trim());
             lines.push('');
@@ -353,18 +371,22 @@ async function exportNovelEpub(novelId) {
         chapters.forEach((ch, i) => {
             const id = `ch${i + 1}`;
             spineIds.push(id);
-            const paragraphs = (ch.content || '').replace(/\r\n/g, '\n').split(/\n{2,}/).map(p => `<p>${exportXmlEscape(p.trim())}</p>`).join('');
+            // 只按双换行切段，会把"单换行分段"的中文稿件整章并成一坨。
+            // 中文写作两种习惯都常见，所以先判断：有连续空行就按空行切，否则按单换行切。
+            const paragraphs = exportSplitParagraphs(ch.content)
+                .map(p => `<p>${exportXmlEscape(p)}</p>`).join('');
+            const heading = exportChapterHeading(ch);
             files.push({
                 name: `OEBPS/chapter-${i + 1}.xhtml`,
                 data: enc(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN">
 <head>
-  <title>第${ch.number}章 ${exportXmlEscape(ch.title || '')}</title>
+  <title>${exportXmlEscape(heading)}</title>
   <link rel="stylesheet" type="text/css" href="style.css"/>
 </head>
 <body>
-  <h2>第${ch.number}章 ${exportXmlEscape(ch.title || '')}</h2>
+  <h2>${exportXmlEscape(heading)}</h2>
   ${paragraphs}
 </body>
 </html>`)
@@ -373,7 +395,7 @@ async function exportNovelEpub(novelId) {
 
         // 4) nav 目录 (EPUB3)
         const navItems = chapters.map((ch, i) =>
-            `<li><a href="chapter-${i + 1}.xhtml">第${ch.number}章 ${exportXmlEscape(ch.title || '')}</a></li>`).join('');
+            `<li><a href="chapter-${i + 1}.xhtml">${exportXmlEscape(exportChapterHeading(ch))}</a></li>`).join('');
         files.push({
             name: 'OEBPS/nav.xhtml',
             data: enc(`<?xml version="1.0" encoding="UTF-8"?>

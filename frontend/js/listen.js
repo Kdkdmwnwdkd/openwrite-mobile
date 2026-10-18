@@ -68,6 +68,11 @@ function listenSplitSentences(text) {
 
 // ===== 渲染 =====
 async function renderListen(container, novelId, chapterNum) {
+    if (!novelId || !chapterNum) {
+        ui.showToast('请从章节里点「听稿」进入');
+        navigateTo('bookshelf');
+        return;
+    }
     const novel = await novelManager.get(novelId);
     if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
     const chapter = await novelManager.getChapter(novelId, chapterNum);
