@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.14.0',   // 与 package.json 保持一致
+    VERSION: '2.15.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1634,7 +1634,7 @@ async function renderChat(container) {
                 <button class="composer-btn" onclick="showModelIndicator()">⚙ 默认</button>
                 <button class="composer-btn" onclick="showMemory()">🧠</button>
                 <button class="composer-btn" onclick="rollDice()">🎲</button>
-                <button class="composer-send" onclick="sendMessage()">➤</button>
+                <button class="composer-send" id="chat-send-btn" onclick="sendMessage()">➤</button>
             </div>
         </div>
     `;
@@ -1738,6 +1738,36 @@ async function buildChatNovelContext(novelId) {
 // - 关联作品后，systemPrompt 注入该书设定包，AI 聊设定/剧情时始终心里有数；
 // - AI 给出的新设定用 :::setting 块输出，前端渲染成「可沉淀设定卡」，一键入库；
 // - 入库后的角色/世界观会自动进入写作上下文（buildLayeredContext）。
+// v2.15.0：从「AI 直接开写」改成「先把人立起来，再动笔」。
+// 旧版第一句是"默认由你直接产出正文"，模型照做——用户只说"写小说"，
+// 它就跳过全部设定直接输出正文，人物是它临时编的，作者没有代入感。
+const CHAT_WRITER_PROMPT = `你是 OpenWrite 的写作搭档。写小说不是写文案：读者记住的永远是人，不是设定。所以你的工作分两步——先把人和世界立起来，再动笔。
+
+【什么时候还不能写】
+下面这些没弄清楚之前，不要写正文：
+· 主角是谁（名字、身份、眼下处境）
+· 主角想要什么，或被什么困住
+· 故事的世界有什么特别的规矩（类型已经暗示的部分够用，就不必再问）
+
+【怎么问】
+· 一次只问一个问题，问最要紧的那个。不要列 1/2/3 清单，不要把三四个问题塞进同一段话。
+· 问完就停，等对方回答。不要自问自答。
+· 每个问题顺带给两三个具体选项，让对方好接话。比如"他是刚入行的新人，还是干了十年的老手？"
+· 对方说"你定""随便""看着办"，就直接给一个具体方案，让他只需点头或摇头，别再反问。
+· 语气像同行聊天，不像表单填写。
+
+【什么时候可以写】
+· 上面三条都清楚了：先用两三句话复述你理解的故事（谁、要什么、卡在哪），问一句"是这么回事吗"，确认之后再写。
+· 对方明确说"直接写""别问了""先来一段"：立刻写，不要再问。缺的细节你自己补，写完用一句说明你替他定了什么。
+· 已经关联作品、角色和世界观也已建档：直接用档案写，不要重复问。
+
+【写的时候】
+· 直接从第一句正文开始，不要"以下是正文"这类前言，不要小标题。
+· 默认 1500-2500 字，段落之间空一行。
+· 信息不足宁可写短，也不要编出与人设冲突的内容。
+
+回答简洁、直接，有行动建议。`;
+
 const SETTING_BLOCK_INSTRUCTION = `
 【设定沉淀协议】当你在对话中提出或完善了新的世界观规则、角色性格/外貌/身份等设定时，除正常回答外，必须把该设定单独输出为一个块，格式严格如下（供用户一键存入设定库）：
 :::setting{"type":"character","name":"设定名称"}
@@ -1779,7 +1809,7 @@ async function sendMessage() {
     messagesBox.scrollTop = messagesBox.scrollHeight;
 
     // 判定是否带技能上下文
-    let systemPrompt = '你是OpenWrite的AI小说写手。默认由你直接产出正文；用户通过对话补充世界观、角色性格、剧情走向等设定，你负责记住并落实到文字里。回答保持简洁、直接、有行动建议。';
+    let systemPrompt = CHAT_WRITER_PROMPT;
     const activeSkill = store.activeChatSkill;
     if (activeSkill) {
         const skill = await skillManager.get(activeSkill);
@@ -3673,8 +3703,8 @@ function startNovelCreationGuide() {
     if (actionList) actionList.style.display = 'none';
     if (novelGuideState.messagesBox) novelGuideState.messagesBox.style.display = 'flex';
     
-    // AI 第一条消息：问类型（自由输入）
-    addChatMessage('ai', '你好！我是你的 AI 写作助手 ✨\n\n你想写什么类型的小说？（如：玄幻、都市、科幻、悬疑等）');
+    // 第一步：类型。允许模糊描述——很多人这时候脑子里只有一句画面
+    addChatMessage('ai', '你好，我是你的写作搭档 ✨\n\n先说个大概：想写哪一类？（玄幻、都市、科幻、悬疑、历史…说不出具体的，描述一句画面也行）');
     setupGuideInputHandler('genre');
 }
 
@@ -3687,12 +3717,14 @@ function addChatMessage(role, text, options = []) {
     
     let optionsHtml = '';
     if (options.length > 0) {
-        optionsHtml = `<div class="msg-options">${options.map((opt, i) => 
-            `<button class="msg-option-btn" onclick="window._guideOption${Date.now()}_${i}()">${escapeHtml(opt.label)}</button>`
+        // 时间戳只能取一次：map 和 forEach 各自调 Date.now()，跨毫秒就会错开，
+        // onclick 指向一个从没绑过的名字，按钮看着能点、实际没反应
+        const ts = Date.now();
+        optionsHtml = `<div class="msg-options">${options.map((opt, i) =>
+            `<button class="msg-option-btn" onclick="window._guideOption${ts}_${i}()">${escapeHtml(opt.label)}</button>`
         ).join('')}</div>`;
-        // 绑定全局函数
         options.forEach((opt, i) => {
-            window[`_guideOption${Date.now()}_${i}`] = opt.action;
+            window[`_guideOption${ts}_${i}`] = opt.action;
         });
     }
     
@@ -3720,16 +3752,55 @@ async function guideAnswer(key, value) {
 
 async function runGuideStep() {
     const { step, answers } = novelGuideState;
-    
+
     if (step === 1) {
-        // 已回答类型，问书名
-        addChatMessage('ai', `好的，${answers.genre}题材！你想给这本书起什么名字？`);
+        addChatMessage('ai', `${answers.genre}，行。\n\n书名叫什么？没定就先随便取一个，后面能改。`);
         setupGuideInputHandler('title');
     } else if (step === 2) {
-        // 已回答书名，直接生成大纲
-        addChatMessage('ai', `收到，书名是《${answers.title}》。让我为你构思故事大纲…`);
+        // 关键一步：旧版在这里直接生成大纲，角色全是 AI 编的，作者没有代入感
+        addChatMessage('ai', `《${answers.title}》，记下了。\n\n现在说主角——叫什么名字，是干什么的？一句话就够。`);
+        setupGuideInputHandler('protagonist');
+    } else if (step === 3) {
+        addChatMessage('ai', `主角有了。\n\n他最想要什么，或者被什么事困住？这一条决定整本书往哪走。`, [
+            { label: '想不出，你先拟一个', action: () => guideDraftAnswer('desire') },
+            { label: '跳过', action: () => guideAnswer('desire', '（未定，由你按类型补）') }
+        ]);
+        setupGuideInputHandler('desire');
+    } else if (step === 4) {
+        addChatMessage('ai', `最后一件：这个世界有什么特别的规矩？\n\n比如「修行要先交命」「下雨天不能出门」。想不出就跳过，我按类型常规来。`, [
+            { label: '跳过', action: () => guideAnswer('world', '（按类型常规设定）') }
+        ]);
+        setupGuideInputHandler('world');
+    } else if (step === 5) {
+        addChatMessage('ai', '够了，我按这些搭故事…');
         await generateNovelFromGuide();
     }
+}
+
+// 「你先拟一个」：把建议填进输入框，用户按发送才生效——保留最后决定权
+async function guideDraftAnswer(key) {
+    if (!novelGuideState) return;
+    const a = novelGuideState.answers;
+    const ctx = `类型：${a.genre}｜书名：${a.title}｜主角：${a.protagonist}`;
+    const ask = key === 'desire'
+        ? '给这个主角一个具体、有张力的核心欲望或困境。只输出一句话，不超过 20 字，不要解释、不要引号。'
+        : '给这个世界一条具体、有记忆点的规矩。只输出一句话，不超过 25 字，不要解释、不要引号。';
+
+    addChatMessage('ai', '我想想…');
+    try {
+        const r = await ai.chat([
+            { role: 'system', content: '你是小说策划，回答必须极简，只给结论。' },
+            { role: 'user', content: `${ctx}\n\n${ask}` }
+        ], null, 200);
+        const v = (r || '').trim().split('\n')[0].replace(/^["「『]|["」』]$/g, '').trim();
+        if (v) {
+            const input = document.getElementById('chat-input');
+            if (input) { input.value = v; input.focus(); }
+            addChatMessage('ai', `先拟这个：${v}\n\n按发送就用它，或者直接改成你的。`);
+            return;
+        }
+    } catch (e) { /* 失败就退回自由输入 */ }
+    addChatMessage('ai', '这个我一时没想好，你说个大概方向也行。');
 }
 
 function setupGuideInputHandler(expectedKey) {
@@ -3768,12 +3839,23 @@ async function generateNovelFromGuide() {
     const title = answers.title || '未命名';
     
     try {
-        // 生成大纲（只基于类型和书名，AI自动补充角色和梗概）
-        const prompt = `请为一部${genre}小说生成完整大纲，书名是《${title}》：
-1. 10-15章的章节大纲
-2. 3-5个关键角色设定（含主角身份、性格）
-3. 世界观简述
-4. 故事梗概（100字左右）
+        // 旧版只把类型和书名给模型，角色和世界观全由它编——用户拿到的是别人的故事。
+        // 现在把用户亲口说过的三件事当作硬约束传进去，模型只补缺口。
+        const given = [];
+        if (answers.protagonist) given.push(`主角：${answers.protagonist}`);
+        if (answers.desire) given.push(`主角的核心欲望或困境：${answers.desire}`);
+        if (answers.world) given.push(`世界设定：${answers.world}`);
+
+        const prompt = `请为一部${genre}小说生成完整大纲，书名是《${title}》。
+
+${given.length ? `以下是作者已经定下的设定，必须严格执行，不得改名、不得改成别的身份：
+${given.join('\n')}
+` : ''}
+要求：
+1. 10-15 章的章节大纲
+2. 角色表：主角必须沿用上面的设定（名字一字不改）；另补 2-4 个配角，写清身份、性格、与主角的关系
+3. 世界观简述：已有设定要接着写，不要另起一套；没给的才由你补
+4. 故事梗概（100 字左右），要围绕主角的那个欲望或困境展开
 
 请严格输出JSON格式（不要markdown代码块）：
 {
@@ -3813,7 +3895,10 @@ async function generateNovelFromGuide() {
         const outlineText = (plan.outline || []).map(o => `第${o.chapter}章 ${o.title}`).join('\n');
         const charsText = (plan.characters || []).map(c => `• ${c.name}（${c.role}）：${c.description}`).join('\n');
         
-        addChatMessage('ai', `📖 大纲已生成！\n\n书名：《${title}》\n\n📋 章节规划：\n${outlineText}\n\n👥 主要角色：\n${charsText}\n\n确认创建这本小说吗？`, [
+        const givenLine = answers.protagonist
+            ? `\n\n✍️ 主角按你说的：${answers.protagonist}${answers.desire ? `\n　 动机：${answers.desire}` : ''}`
+            : '';
+        addChatMessage('ai', `📖 大纲已生成！\n\n书名：《${title}》\n\n📋 章节规划：\n${outlineText}\n\n👥 主要角色：\n${charsText}${givenLine}\n\n确认创建这本小说吗？（角色名不对可以点重新生成，或创建后手动改）`, [
             { label: '✅ 确认创建', action: () => guideConfirmCreate(plan, title) },
             { label: '🔄 重新生成', action: () => { novelGuideState.step = 1; runGuideStep(); } },
             { label: '❌ 取消', action: () => { novelGuideState = null; addChatMessage('ai', '已取消。你可以随时重新点击「新书启航」开始。'); } }

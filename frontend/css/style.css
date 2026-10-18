@@ -487,9 +487,12 @@ html, body {
     word-break: break-word;
 }
 
+/* 用户气泡用浅纸底 + 墨字，不用朱砂实心：
+   一屏里出现三四个深红色块，既压住正文，也违反「强调色不超过 10% 面积」 */
 .msg-bubble.user {
-    background: var(--primary);
-    color: #fff;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
     border-bottom-right-radius: 4px;
 }
 
