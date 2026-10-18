@@ -4811,3 +4811,16 @@ body{ background: var(--bg); }
 .tree-icon, .tree-file-icon{ display: none; }
 .editor-container{ min-height: calc(100vh - 340px); }
 .tree-folder-header .tree-label{ font-family: var(--serif); font-size: 15px; }
+
+/* 联网开关与来源标记 */
+.composer-search-btn.on {
+    background: var(--success);
+    color: #fff;
+    border-color: var(--success);
+}
+.web-src {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    padding: 3px 6px 10px;
+    line-height: 1.5;
+}

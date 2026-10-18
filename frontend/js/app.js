@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.15.0',   // 与 package.json 保持一致
+    VERSION: '2.16.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1578,7 +1578,6 @@ async function renderChat(container) {
                 <button class="chat-tool-pill" onclick="showNameGenerator()"><span class="tool-pill-icon" style="font-size:13px;font-weight:600;">T</span>起名</button>
                 <button class="chat-tool-pill primary" onclick="navigateTo('distill')"><span class="tool-pill-icon"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 3l9 16H3L12 3z"/><path d="M12 12v4"/></svg></span>蒸馏</button>
                 <button class="chat-tool-pill" onclick="showDeconstruct()"><span class="tool-pill-icon"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span>拆解</button>
-                <button class="chat-tool-pill" onclick="showRank()"><span class="tool-pill-icon"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></span>扫榜</button>
             </div>
 
             <!-- 中央 Logo 区域 -->
@@ -1623,7 +1622,7 @@ async function renderChat(container) {
         <!-- 整合式底部输入区 -->
         <div class="chat-composer">
             <div class="composer-top">
-                <button class="composer-search-btn" onclick="showWebSearch()">🌐 联网搜索</button>
+                <button class="composer-search-btn" id="chat-websearch-btn" onclick="showWebSearch()">🌐 联网搜索</button>
             </div>
             <div class="composer-input-box">
                 <textarea class="composer-textarea" id="chat-input" placeholder="和 AI 聊剧情、补设定，让它把正文写出来…"></textarea>
@@ -1824,6 +1823,21 @@ async function sendMessage() {
         if (novelCtx) systemPrompt += `\n\n${novelCtx}\n\n${SETTING_BLOCK_INSTRUCTION}`;
     }
 
+    // 联网：先检索，再把这批资料作为「事实依据」塞进系统提示。
+    // 检索失败不阻断对话——用户要的是回答，不是一句报错。
+    let webHits = [];
+    if (store.webSearchOn) {
+        aiLoading.innerHTML = `<div class="msg-bubble ai loading">正在联网检索…</div>`;
+        messagesBox.scrollTop = messagesBox.scrollHeight;
+        try {
+            webHits = await researchSearch(text);
+            if (webHits.length) systemPrompt += buildWebContext(webHits);
+        } catch (e) {
+            ui.showToast('联网检索失败，本条按普通对话回答：' + e.message, 4500);
+        }
+        aiLoading.innerHTML = `<div class="msg-bubble ai loading">AI 思考中<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
+    }
+
     try {
         let fullText = '';
         const response = await ai.chat([
@@ -1845,6 +1859,12 @@ async function sendMessage() {
             ? `<div class="setting-cards">${finalParsed.settings.map((s, i) => renderSettingCard(s, i)).join('')}</div>`
             : '';
         aiLoading.innerHTML = `<div class="msg-bubble ai">${escapeHtml(finalParsed.clean).replace(/\n/g, '<br>')}</div>${cardsHtml}<button class="msg-more ai-more" onclick="showSinkMenu(this)" data-text="${escapeHtml(finalParsed.clean).replace(/"/g, '&quot;')}" title="沉淀为设定">⋮</button>`;
+        // 来源单独插在消息行外面：msg-row 是 flex 行，塞进去会被挤到气泡右侧
+        if (webHits.length) {
+            const sites = webHits.slice(0, 3).map(h => escapeHtml(h.site || h.title || '来源')).join('、');
+            aiLoading.insertAdjacentHTML('afterend',
+                `<div class="web-src">🌐 已检索 ${webHits.length} 条：${sites}${webHits.length > 3 ? ' 等' : ''}</div>`);
+        }
 
         // 保存消息（去掉设定块，保留干净正文）
         try {
@@ -2029,7 +2049,16 @@ async function clearChatSkill() {
 
 // ===== 模型/记忆/起名/蒸馏/拆解/扫榜 入口 =====
 function showModelIndicator() { showModelConfigModal(); }
-function showMemory() { ui.showToast('记忆功能：写作设定记忆库开发中...'); }
+// 「记忆」这个按钮指的是这本书的设定集：角色 + 世界观 + 参考资料，全在作品里，
+// 没必要另造一套存储，直接把用户送到那里。
+function showMemory() {
+    if (!store.chatNovelId) {
+        ui.showToast('先关联一部作品，记忆库就是它的角色与设定');
+        showChatNovelPicker();
+        return;
+    }
+    navigateTo('worldview', { novelId: store.chatNovelId });
+}
 function showNameGenerator() {
     const modal = createModal('AI 起名', `
         <div class="form-group">
@@ -2253,14 +2282,95 @@ function renderDeconstructMarkdown(md) {
     closeList();
     return out.join('');
 }
-function showRank() { ui.showToast('扫榜功能开发中...'); }
-function continueWriting() { navigateTo('bookshelf'); }
+// 「继续写作」原来只是跳到书架，还得自己点进书、再点进章。
+// 它应该直接落到上次写的那一章。
+async function continueWriting() {
+    try {
+        const novels = await novelManager.list();
+        if (!novels || !novels.length) { navigateTo('bookshelf'); return; }
+        const recent = novels.slice().sort((a, b) => (b.updated || 0) - (a.updated || 0))[0];
+        const chs = await novelManager.listChapters(recent.id);
+        const last = chs.slice().sort((a, b) => b.number - a.number)[0];
+        if (last) navigateTo('chapterEdit', { novelId: recent.id, chapterNum: last.number });
+        else navigateTo('novelDetail', { novelId: recent.id });
+    } catch (e) {
+        navigateTo('bookshelf');
+    }
+}
 function showTutorial() { showTutorialModal(); }
 function showDistill() { navigateTo('distill'); }
 function useSkill() { openSkillPicker(); }
-function attachFile() { ui.showToast('文件功能开发中...'); }
+// 附件：读文本文件，把内容接到输入框（不直接发送，用户还能编辑）。
+// 手机上用 <input type=file> 会唤起系统文件选择器，WebView 同样支持。
+function attachFile() {
+    const picker = document.createElement('input');
+    picker.type = 'file';
+    picker.accept = '.txt,.md,.markdown,.text,text/plain';
+    picker.onchange = async () => {
+        const f = picker.files && picker.files[0];
+        if (!f) return;
+        if (f.size > 2 * 1024 * 1024) {
+            ui.showToast('文件超过 2MB，先截取需要的部分再放进来', 4000);
+            return;
+        }
+        try {
+            const text = await f.text();
+            const box = document.getElementById('chat-input');
+            if (!box) return;
+            const LIMIT = 6000;
+            const clipped = text.length > LIMIT;
+            const body = `【附件：${f.name}】\n${text.slice(0, LIMIT)}${clipped ? '\n…（已截取前 6000 字）' : ''}`;
+            box.value = (box.value ? box.value + '\n\n' : '') + body;
+            box.focus();
+            box.selectionStart = box.selectionEnd = box.value.length;
+            ui.showToast(`已读入 ${f.name}（${text.length} 字）${clipped ? '，已截断' : ''}`);
+        } catch (e) {
+            ui.showToast('读取失败：' + e.message, 4000);
+        }
+    };
+    picker.click();
+}
 function rollDice() { ui.showToast(`🎲 ${Math.floor(Math.random() * 6) + 1}`); }
-function webSearch() { ui.showToast('联网搜索功能开发中...'); }
+// 联网开关：原来按钮指向 showWebSearch()，而这个函数根本没定义，点了直接 ReferenceError；
+// 旁边的 webSearch() 只弹一句"开发中"。等于完全没实现。
+async function showWebSearch() {
+    const turningOn = !store.webSearchOn;
+
+    if (turningOn) {
+        let cfg = null;
+        try { cfg = await getResearchConfig(); } catch (e) { cfg = null; }
+        if (!cfg || cfg.mode === 'off') {
+            ui.showToast('先选一种联网方式：模型自带，或搜索 API');
+            openResearchConfig();
+            return;
+        }
+    }
+
+    store.webSearchOn = turningOn;
+    try { localStorage.setItem('ow_web_search', turningOn ? '1' : '0'); } catch (e) { /* 忽略 */ }
+    renderWebSearchBtn();
+    ui.showToast(turningOn ? '已联网：发消息前会先检索资料' : '已关闭联网');
+}
+
+function renderWebSearchBtn() {
+    const b = document.getElementById('chat-websearch-btn');
+    if (!b) return;
+    b.classList.toggle('on', !!store.webSearchOn);
+    b.textContent = store.webSearchOn ? '🌐 联网中' : '🌐 联网搜索';
+}
+
+// 把检索结果压成一段可注入的事实依据。压缩到 500 字/条：
+// 全文塞进去会把对话挤爆，而 500 字足够覆盖"品级、年代、名词解释"这类查证需求。
+function buildWebContext(hits) {
+    if (!hits || !hits.length) return '';
+    const lines = hits.slice(0, 4).map((r, i) => {
+        const tail = r.fullText ? String(r.fullText).slice(0, 800) : String(r.snippet || '').slice(0, 500);
+        return `[${i + 1}] ${r.title}${r.site ? '（' + r.site + '）' : ''}\n${tail}`;
+    });
+    return `\n\n【联网检索结果】下面是刚刚实时检索到的资料，涉及事实、数据、专有名词时以它们为准；`
+        + `没查到或资料互相矛盾，就说明不确定，不要凭印象编造。与当前问题无关的内容可以忽略。\n\n`
+        + lines.join('\n\n');
+}
 
 // ===== Bookshelf Page (v2.2.0 with stats dashboard) =====
 async function renderBookshelf(container) {
@@ -4504,6 +4614,7 @@ if ('serviceWorker' in navigator) {
 const store = {
     currentPage: 'chat',
     currentParams: {},          // 当前页面参数，供返回时还原
+    webSearchOn: false,         // 聊天页联网开关（持久化在 localStorage）
     currentSessionId: 'main',   // 对话会话 id（老数据都在 main 下）
     currentNovel: null,
     currentChapter: null,
@@ -4651,6 +4762,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Default to chat page (matching competitor)
     navigateTo('chat');
+
+    // 恢复上次的联网开关
+    try {
+        store.webSearchOn = localStorage.getItem('ow_web_search') === '1';
+        renderWebSearchBtn();
+    } catch (e) { /* 忽略 */ }
 
     // 原生壳能力：启动图、状态栏、返回键（网页环境自动跳过）
     initNativeShell();
@@ -5179,7 +5296,7 @@ async function switchChatSession(sessionId) {
         store.chatMessages = msgs.sort((a, b) => (a.created || 0) - (b.created || 0));
         
         // 更新UI显示消息
-        const container = document.getElementById('chat-view');
+        const container = document.getElementById('page-chat');
         if (container) {
             // 隐藏hero和卡片，显示消息
             const hero = container.querySelector('.chat-hero');
@@ -5239,7 +5356,7 @@ const MEMO_CATEGORIES = [
 ];
 
 async function showMemo() {
-    const container = document.getElementById('chat-view');
+    const container = document.getElementById('page-chat');
     if (!container) return;
     
     const memos = await db.getAll('memos') || [];
@@ -5321,9 +5438,45 @@ async function saveMemo() {
     showMemo();
 }
 
-function viewMemo(id) {
-    // 可以查看/编辑备忘录详情
-    ui.showToast('备忘录查看功能开发中');
+async function viewMemo(id) {
+    const m = await db.get('memos', id);
+    if (!m) { ui.showToast('找不到这条备忘录'); return; }
+    const modal = createModal('备忘录', `
+        <div class="form-group">
+            <label class="form-label">标题</label>
+            <input class="input" id="memo-title" value="${escapeAttr(m.title || '')}">
+        </div>
+        <div class="form-group">
+            <label class="form-label">内容</label>
+            <textarea class="input" id="memo-body" rows="9">${escapeHtml(m.content || '')}</textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-danger" onclick="deleteMemoConfirm('${m.id}')">删除</button>
+            <button class="btn btn-primary" onclick="saveMemoEdit('${m.id}')">保存</button>
+        </div>`);
+    modal.show();
+}
+
+async function saveMemoEdit(id) {
+    const m = await db.get('memos', id);
+    if (!m) { ui.showToast('找不到这条备忘录'); return; }
+    const t = (document.getElementById('memo-title') || {}).value || '';
+    const b = (document.getElementById('memo-body') || {}).value || '';
+    m.title = t.trim() || m.title;
+    m.content = b;
+    m.updated = Date.now();
+    await db.put('memos', m);
+    closeModal();
+    ui.showToast('已保存');
+    showMemo();
+}
+
+async function deleteMemoConfirm(id) {
+    if (!confirm('删除这条备忘录？删了找不回来。')) return;
+    await db.delete('memos', id);
+    closeModal();
+    ui.showToast('已删除');
+    showMemo();
 }
 
 // ===== Novel Tree Browser Helpers =====
