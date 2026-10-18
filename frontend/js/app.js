@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.16.2',   // 与 package.json 保持一致
+    VERSION: '2.17.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -944,6 +944,12 @@ const novelManager = {
         }
         await db.put('chapters', chapter);
 
+        // 今日新增字数：自动保存会频繁调用，但每次只累加"比上次多了多少"，
+        // 结果就是真实净增量；删字不计入（负数忽略）。
+        const prevWords = existing ? (existing.wordCount || 0) : 0;
+        const delta = content.length - prevWords;
+        if (delta > 0) addTodayWords(delta).catch(() => {});
+
         // Update novel stats
         const novel = await this.get(novelId);
         if (novel) {
@@ -1447,6 +1453,11 @@ let pageHistory = [];
 let __suppressHistoryPush = false;   // 返回操作本身不再入栈
 
 function navigateTo(page, params = {}, isRootTab = false) {
+    // 离开编辑器时退出专注，否则回来还是全屏状态
+    if (store.currentPage === 'chapterEdit' && page !== 'chapterEdit') {
+        toggleFocusMode(false);
+    }
+
     // 离开听稿页要停止朗读，否则切走了还在念
     if (store.currentPage === 'listen' && page !== 'listen' && typeof listenStop === 'function') {
         listenStop();
@@ -1631,19 +1642,40 @@ async function renderChat(container) {
                 <button class="composer-search-btn" id="chat-websearch-btn" onclick="showWebSearch()">🌐 联网搜索</button>
             </div>
             <div class="composer-input-box">
-                <textarea class="composer-textarea" id="chat-input" placeholder="和 AI 聊剧情、补设定，让它把正文写出来…"></textarea>
+                <textarea class="composer-textarea" id="chat-input" rows="1"
+                          oninput="autoGrowInput(this)"
+                          placeholder="和 AI 聊剧情、补设定，让它把正文写出来…"></textarea>
             </div>
             <div class="composer-toolbar">
                 <button class="composer-btn" onclick="openSkillPicker()">@ 技能</button>
                 <button class="composer-btn" onclick="attachFile()"># 文件</button>
-                <button class="composer-btn" onclick="showModelIndicator()">⚙ 默认</button>
-                <button class="composer-btn" onclick="showMemory()">🧠</button>
-                <button class="composer-btn" onclick="rollDice()">🎲</button>
+                <button class="composer-btn" onclick="showModelIndicator()">${ICON_GEAR} 默认</button>
+                <button class="composer-btn" onclick="showMemory()" title="设定集">${ICON_BOOK}</button>
+                <button class="composer-btn" onclick="rollDice()" title="随机">${ICON_DICE}</button>
                 <button class="composer-send" id="chat-send-btn" onclick="sendMessage()">➤</button>
             </div>
         </div>
     `;
     renderChatNovelCtx();
+    syncComposerPadding();
+}
+
+// 输入框是 fixed 的，内容区要按它的真实高度留白，否则最后一条消息会被压住
+// 输入框随内容长高，最多 5 行，超过就内部滚动
+function autoGrowInput(el) {
+    if (!el) return;
+    el.style.height = 'auto';
+    const max = 5 * 22 + 20;
+    el.style.height = Math.min(el.scrollHeight, max) + 'px';
+    syncComposerPadding();
+}
+
+function syncComposerPadding() {
+    const page = document.getElementById('page-chat');
+    if (!page) return;
+    const composer = page.querySelector('.chat-composer');
+    if (!composer) return;
+    page.style.paddingBottom = (composer.offsetHeight + 14) + 'px';
 }
 
 // 渲染「当前关联作品」条：未关联 = 自由聊天；关联后 = 设定注入 + 可沉淀
@@ -1737,6 +1769,12 @@ async function buildChatNovelContext(novelId) {
         return '';
     }
 }
+
+// 底部工具栏用 SVG：部分安卓机没有彩色 emoji 字体，🧠 🎲 会渲染成空心方块
+const _ic = (d, size = 14) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px">${d}</svg>`;
+const ICON_GEAR = _ic('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>');
+const ICON_BOOK = _ic('<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 18.5V5.5"/>');
+const ICON_DICE = _ic('<rect x="3" y="3" width="18" height="18" rx="3.5"/><circle cx="8.5" cy="8.5" r="1.2" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/>');
 
 // ===== 聊天消息发送 =====
 // v2.9.0：AI 主写手范式。
@@ -2383,6 +2421,7 @@ function buildWebContext(hits) {
 async function renderBookshelf(container) {
     ui.setPageTitle('我的小说');
     ui.setHeaderActions(`
+        <button class="header-btn" onclick="importNovel()">导入</button>
         <button class="header-btn" onclick="createNovelWithAI()">+ 新建</button>
     `);
     ui.showLoading(container);
@@ -2417,11 +2456,29 @@ async function renderBookshelf(container) {
                 <div class="empty-state">
                     <div class="empty-icon">📖</div>
                     <div class="empty-title">书架空空如也</div>
-                    <div class="empty-desc">点击右上角 + 新建开始创作你的第一部小说</div>
+                    <div class="empty-desc">新建一本开始写，或者把旧稿导进来</div>
+                    <div class="empty-actions">
+                        <button class="btn btn-primary" onclick="createNovelWithAI()">新建作品</button>
+                        <button class="btn btn-outline" onclick="importNovel()">导入旧稿</button>
+                    </div>
                 </div>
             `;
             return;
         }
+
+        const todayWords = await getTodayWords();
+        const dailyGoal = await getDailyGoal();
+        const dgPct = Math.min(100, Math.round(todayWords / dailyGoal * 100));
+        const dgLeft = Math.max(0, dailyGoal - todayWords);
+        const dailyHtml = `
+            <div class="daily-goal" onclick="showDailyGoalSetting()">
+                <div class="dg-top">
+                    <span class="dg-k">今日</span>
+                    <span class="dg-num">${todayWords.toLocaleString()}<i> / ${dailyGoal.toLocaleString()}</i></span>
+                    <span class="dg-hint">${dgLeft > 0 ? `还差 ${dgLeft.toLocaleString()} 字` : '已达标'}</span>
+                </div>
+                <div class="dg-bar"><i style="width:${dgPct}%"></i></div>
+            </div>`;
 
         // 写作 App 的第一动作是「接着上次写」，所以把最近一章放到最上面
         let resumeHtml = '';
@@ -2449,6 +2506,7 @@ async function renderBookshelf(container) {
         }
 
         container.innerHTML = `
+            ${dailyHtml}
             ${resumeHtml}
             <div class="stats-dashboard">
                 <div class="stats-dashboard-title">📊 数据统计</div>
@@ -2606,6 +2664,195 @@ async function renderNovelDetail(container, novelId) {
         `;
     } catch (err) {
         ui.showEmptyState(container, { icon: '⚠️', title: '加载失败', desc: err.message });
+    }
+}
+
+// ===== 每日字数目标（v2.17.0）=====
+// 码字类 App 唯一被验证有效的留人机制：每天有个"还差 800 字"的钩子。
+const DAILY_GOAL_DEFAULT = 2000;
+
+function todayKey() {
+    const d = new Date();
+    const p2 = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+}
+
+async function getDailyGoal() {
+    const v = await settings.get('dailyGoal', DAILY_GOAL_DEFAULT);
+    return Number(v) > 0 ? Number(v) : DAILY_GOAL_DEFAULT;
+}
+
+async function getTodayWords() {
+    const rec = await settings.get('dailyWords', null);
+    return rec && rec.date === todayKey() ? (rec.words || 0) : 0;
+}
+
+async function addTodayWords(delta) {
+    if (!delta || delta <= 0) return;
+    const key = todayKey();
+    const rec = await settings.get('dailyWords', null);
+    const cur = rec && rec.date === key ? (rec.words || 0) : 0;
+    await settings.set('dailyWords', { date: key, words: cur + delta });
+}
+
+async function showDailyGoalSetting() {
+    const goal = await getDailyGoal();
+    const today = await getTodayWords();
+    createModal('每日写作目标', `
+        <div class="imp-summary">今天已写 <b>${today.toLocaleString()}</b> 字</div>
+        <div class="form-group">
+            <label class="form-label">每天目标（字）</label>
+            <input class="input" id="dg-input" type="number" min="100" step="100" value="${goal}">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeModal()">取消</button>
+            <button class="btn btn-primary" onclick="saveDailyGoal()">保存</button>
+        </div>`).show();
+}
+
+async function saveDailyGoal() {
+    const el = document.getElementById('dg-input');
+    const v = Number((el && el.value) || 0);
+    if (!v || v < 100) { ui.showToast('目标至少 100 字'); return; }
+    await settings.set('dailyGoal', v);
+    closeModal();
+    ui.showToast(`目标已设为每天 ${v.toLocaleString()} 字`);
+    if (store.currentPage === 'bookshelf') navigateTo('bookshelf', {}, true);
+}
+
+// ===== 专注模式（v2.17.0）=====
+// 写作时界面该退到背景里：只留正文和字数，其余全隐。
+function toggleFocusMode(on) {
+    const next = typeof on === 'boolean' ? on : !document.body.classList.contains('focus-mode');
+    document.body.classList.toggle('focus-mode', next);
+
+    const old = document.getElementById('focus-exit-btn');
+    if (old) old.remove();
+
+    if (next) {
+        const btn = document.createElement('button');
+        btn.id = 'focus-exit-btn';
+        btn.className = 'focus-exit';
+        btn.textContent = '退出专注';
+        btn.onclick = () => toggleFocusMode(false);
+        document.body.appendChild(btn);
+        const ta = document.getElementById('chapter-content');
+        if (ta) ta.focus();
+    }
+}
+
+// ===== 导入旧稿（v2.17.0）=====
+// 换软件最大的门槛不是功能，是手里那几十万字搬不过来。
+// 这里按「第N章」切分，识别不出来就整篇作为一章，反正能进来就能改。
+
+function splitChapters(text) {
+    const t = String(text || '').replace(/\r\n?/g, '\n');
+    // 只认行首、独立成行的章节标题，避免把正文里的「第三章」误判
+    const re = /^[ \t]*(第\s*[0-9零一二三四五六七八九十百千两]+\s*[章节回][^\n]{0,40})[ \t]*$/gm;
+    const marks = [];
+    let m;
+    while ((m = re.exec(t)) !== null) marks.push({ index: m.index, title: m[1].trim() });
+
+    if (!marks.length) {
+        const body = t.trim();
+        return body ? [{ title: '全文', content: body }] : [];
+    }
+
+    const out = [];
+    const pre = t.slice(0, marks[0].index).trim();
+    if (pre.length > 20) out.push({ title: '序章', content: pre });
+
+    marks.forEach((mk, i) => {
+        const end = i + 1 < marks.length ? marks[i + 1].index : t.length;
+        const body = t.slice(mk.index + mk.title.length, end).trim();
+        out.push({ title: mk.title, content: body });
+    });
+    return out.filter(c => c.content.length > 0);
+}
+
+function pickTextFile(onText) {
+    const picker = document.createElement('input');
+    picker.type = 'file';
+    picker.accept = '.txt,.md,.markdown,text/plain';
+    picker.onchange = async () => {
+        const f = picker.files && picker.files[0];
+        if (!f) return;
+        try {
+            const text = await f.text();
+            onText(text, f.name.replace(/\.[^.]+$/, ''));
+        } catch (e) {
+            ui.showToast('读取失败：' + e.message);
+        }
+    };
+    picker.click();
+}
+
+async function importNovel() {
+    pickTextFile(async (text, fallbackTitle) => {
+        const chapters = splitChapters(text);
+        if (!chapters.length) { ui.showToast('这个文件里没有可导入的文字'); return; }
+
+        const total = chapters.reduce((s, c) => s + c.content.length, 0);
+        const novels = await novelManager.list();
+        const options = novels.map(n => `<option value="${escapeAttr(n.id)}">${escapeHtml(n.title)}（追加）</option>`).join('');
+
+        createModal('导入旧稿', `
+            <div class="imp-summary">
+                识别到 <b>${chapters.length}</b> 章 · 共 <b>${total.toLocaleString()}</b> 字
+            </div>
+            <div class="form-group">
+                <label class="form-label">放进哪里</label>
+                <select class="input" id="imp-target">
+                    <option value="">新建一本《${escapeHtml(fallbackTitle || '导入的书')}》</option>
+                    ${options}
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">前 3 章预览</label>
+                <div class="imp-preview">
+                    ${chapters.slice(0, 3).map((c, i) => `
+                        <div class="imp-row">
+                            <span class="imp-idx">${i + 1}</span>
+                            <span class="imp-title">${escapeHtml(c.title)}</span>
+                            <span class="imp-len">${c.content.length.toLocaleString()} 字</span>
+                        </div>`).join('')}
+                    ${chapters.length > 3 ? `<div class="imp-more">… 还有 ${chapters.length - 3} 章</div>` : ''}
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" onclick="closeModal()">取消</button>
+                <button class="btn btn-primary" onclick="doImport('${escapeAttr(fallbackTitle || '导入的书')}')">导入</button>
+            </div>`).show();
+
+        window.__importChapters = chapters;
+    });
+}
+
+async function doImport(fallbackTitle) {
+    const chapters = window.__importChapters || [];
+    if (!chapters.length) return;
+    const sel = document.getElementById('imp-target');
+    const targetId = sel ? sel.value : '';
+
+    ui.showToast('正在导入…', 3000);
+    try {
+        let novelId = targetId;
+        if (!novelId) {
+            const novel = await novelManager.create(fallbackTitle || '导入的书', '', '');
+            novelId = novel.id;
+        }
+        const existing = await novelManager.listChapters(novelId);
+        let num = existing.length;
+        for (const ch of chapters) {
+            num += 1;
+            await novelManager.saveChapter(novelId, num, ch.title, ch.content, null, { archive: false });
+        }
+        window.__importChapters = null;
+        closeModal();
+        ui.showToast(`已导入 ${chapters.length} 章，共 ${chapters.reduce((s,c)=>s+c.content.length,0).toLocaleString()} 字`, 4000);
+        navigateTo('novelDetail', { novelId });
+    } catch (e) {
+        ui.showToast('导入失败：' + e.message, 4500);
     }
 }
 
@@ -3040,6 +3287,7 @@ async function renderChapterEdit(container, novelId, chapterNum) {
     ui.setPageTitle(chapter ? chapter.title : `第${chapterNum}章`);
     ui.setHeaderActions(`
         <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
+        <button class="header-btn" onclick="toggleFocusMode(true)">专注</button>
         <button class="header-btn" onclick="saveAndBack('${novelId}', ${chapterNum})">保存</button>
     `);
 
@@ -3453,6 +3701,16 @@ async function renderSettings(container) {
                     <div>
                         <div class="settings-label">多设备同步</div>
                         <div class="settings-value">WebDAV 快照同步，换机不丢稿</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+            <div class="settings-item" onclick="showDailyGoalSetting()">
+                <div class="settings-item-left">
+                    <div class="settings-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+                    <div>
+                        <div class="settings-label">每日写作目标</div>
+                        <div class="settings-value">给自己一个每天的字数</div>
                     </div>
                 </div>
                 <span class="settings-arrow">›</span>

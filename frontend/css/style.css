@@ -4824,3 +4824,117 @@ body{ background: var(--bg); }
     padding: 3px 6px 10px;
     line-height: 1.5;
 }
+
+/* ============================================================
+   聊天页布局修正
+   .page-view 是 display:block，所以 .chat-composer 的 margin-top:auto 无效，
+   输入框跟着内容一起滚走——卡片一多就滚到屏幕外，看着像"没有输入框"。
+   改成固定在底部导航之上，再按实际高度给内容留出空间。
+   ============================================================ */
+#page-chat .chat-composer {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--nav-height) + var(--safe-bottom));
+    z-index: 40;
+    border-radius: 16px 16px 0 0;
+    margin-top: 0;
+    box-shadow: 0 -6px 24px rgba(25, 23, 20, .07);
+}
+#page-chat.active { padding-bottom: 170px; }
+
+/* 键盘弹出时视口变矮，输入框要紧贴键盘上沿 */
+@media (max-height: 520px) {
+    #page-chat .chat-composer { position: sticky; bottom: 0; }
+}
+
+/* --- 图标统一收小：44px 容器配 24px 图形，在小屏上像按钮不像图标 --- */
+.chat-action-icon { width: 36px; height: 36px; border-radius: 10px; }
+.chat-action-icon svg { width: 19px; height: 19px; }
+.chat-action-card { padding: 13px 14px; gap: 12px; }
+.tool-pill-icon { font-size: 13px; }
+.tool-pill-icon svg { width: 13px; height: 13px; }
+.chat-tool-pill { padding: 7px 12px; font-size: 12.5px; gap: 5px; }
+.composer-send { width: 34px; height: 34px; font-size: 15px; }
+.composer-btn { padding: 6px 9px; font-size: 11.5px; }
+.chat-hero-logo svg { width: 40px; height: 40px; }
+.chat-hero-title { font-size: 21px; }
+
+/* 导入旧稿 */
+.imp-summary {
+    font-size: 13px; color: var(--text-secondary);
+    background: var(--surface-2); border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 14px;
+}
+.imp-summary b { color: var(--text); font-weight: 600; }
+.imp-preview {
+    border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; margin-top: 4px;
+}
+.imp-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 11px; font-size: 12.5px;
+    border-bottom: 1px solid var(--border);
+}
+.imp-row:last-child { border-bottom: 0; }
+.imp-idx { color: var(--text-tertiary); font-size: 11px; width: 14px; flex: none; }
+.imp-title {
+    flex: 1; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+}
+.imp-len { color: var(--text-tertiary); font-size: 11px; flex: none; }
+.imp-more { padding: 7px 11px; font-size: 11.5px; color: var(--text-tertiary); background: var(--surface-2); }
+.empty-actions { display: flex; gap: 8px; justify-content: center; margin-top: 14px; }
+.empty-actions .btn { height: 38px; padding: 0 16px; font-size: 13px; }
+
+/* ===== 每日字数目标 ===== */
+.daily-goal {
+    padding: 12px 14px; margin-bottom: 12px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; cursor: pointer;
+}
+.dg-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.dg-k { font-family: var(--mono, monospace); font-size: 9.5px; letter-spacing: .14em; color: var(--text-tertiary); }
+.dg-num { font-size: 17px; font-weight: 600; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.dg-num i { font-style: normal; font-size: 11px; font-weight: 400; color: var(--text-tertiary); }
+.dg-hint { margin-left: auto; font-size: 11px; color: var(--text-tertiary); }
+.dg-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.dg-bar i { display: block; height: 100%; background: var(--success); border-radius: 2px; transition: width .4s ease; }
+
+/* ===== 专注模式 ===== */
+body.focus-mode .app-header,
+body.focus-mode .bottom-nav,
+body.focus-mode .action-buttons-row,
+body.focus-mode .editor-save-state,
+body.focus-mode .editor-title-input { display: none !important; }
+
+body.focus-mode #page-chapterEdit { padding: 0; }
+body.focus-mode .main-content { padding-bottom: 0 !important; }
+body.focus-mode .editor-container {
+    border: 0; background: transparent; box-shadow: none;
+    padding: 28px 24px 60px; max-width: 640px; margin: 0 auto;
+    min-height: 100vh;
+}
+body.focus-mode .editor-content {
+    font-size: 17.5px; line-height: 2.15; letter-spacing: .012em;
+    min-height: 80vh;
+}
+.focus-exit {
+    position: fixed; right: 16px;
+    bottom: calc(20px + var(--safe-bottom, 0px));
+    z-index: 60;
+    padding: 7px 14px; border-radius: 999px;
+    background: rgba(25, 23, 20, .72); color: #fff;
+    border: 0; font-size: 12px; font-family: inherit;
+    backdrop-filter: blur(6px);
+    opacity: .55; transition: opacity .2s;
+}
+.focus-exit:active { opacity: 1; }
+
+/* 专注模式：正文顶部留白再多一点，视线不贴边 */
+body.focus-mode .editor-container { padding: 46px 26px 90px; }
+body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary); }
+
+/* 书架统计行：数字和标签挨太紧，读起来像「1作品总数」 */
+.stat-card + .stat-card { margin-left: 10px; }
+.stat-card-value { margin-right: 2px; }
