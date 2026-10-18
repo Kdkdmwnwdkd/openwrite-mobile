@@ -10,10 +10,13 @@
 
 | 通道 | 地址 | 国内速度 |
 |------|------|----------|
-| **CDN 加速（推荐）** | https://testingcf.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-debug.apk | 约 900 KB/s |
-| 备用加速 | https://gcore.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-debug.apk | 约 600 KB/s |
+| **CDN 加速（推荐）** | https://testingcf.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk | 约 900 KB/s |
+| 备用加速 | https://gcore.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk | 约 600 KB/s |
 | 镜像 | https://ghfast.top/https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/download/nightly-debug/app-debug.apk | 约 1 MB/s |
 | 原始（GitHub） | [app-debug.apk](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/download/nightly-debug/app-debug.apk) | 约 18 KB/s |
+
+> CDN 地址里的 `2.14.0` 就是 `package.json` 的 version，换版本时改这一段。
+> 也可以用不带版本号的 `apk/app-debug.apk`，但它受 jsDelivr 长缓存影响，发版后可能还要几小时才更新。
 
 四个地址指向**同一个文件**，逐字节一致，随便哪个下都行。
 
