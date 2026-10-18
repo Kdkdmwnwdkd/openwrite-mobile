@@ -28,7 +28,9 @@ const RESEARCH_PROVIDERS = {
                 url: it.url || '',
                 site: it.siteName || hostOf(it.url),
                 snippet: it.summary || it.snippet || '',
-                date: it.datePublished || ''
+                date: it.datePublished || '',
+                // 博查的 summary 是长摘要，够长时直接当正文，省一次抓取
+                fullText: (it.summary && it.summary.length > 800) ? it.summary : ''
             }));
         }
     },
@@ -51,13 +53,15 @@ const RESEARCH_PROVIDERS = {
         hint: 'Agent 生态广；浏览器直连的跨域支持不稳定，建议配代理',
         endpoint: 'https://api.tavily.com/search',
         headers: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }),
-        body: (q, count) => ({ query: q, max_results: count, include_answer: false }),
+        // include_raw_content 让 Tavily 直接回正文，就不必再抓一次
+        body: (q, count) => ({ query: q, max_results: count, include_answer: false, include_raw_content: true }),
         normalize: (data) => ((data && data.results) || []).map(it => ({
             title: it.title || '',
             url: it.url || '',
             site: hostOf(it.url),
             snippet: it.content || '',
-            date: it.published_date || ''
+            date: it.published_date || '',
+            fullText: it.raw_content || ''
         }))
     }
 };
@@ -67,7 +71,7 @@ function hostOf(url) {
 }
 
 // ===== 配置 =====
-const RESEARCH_DEFAULT = { mode: 'off', provider: 'bocha', apiKey: '', count: 6 };
+const RESEARCH_DEFAULT = { mode: 'off', provider: 'bocha', apiKey: '', reader: '', autoFetch: false, count: 6 };
 
 async function getResearchConfig() {
     const saved = await settings.get('researchConfig', null);
@@ -137,14 +141,111 @@ async function researchSearch(query) {
     return await researchSearchApi(query, cfg);
 }
 
+// ===== 正文抓取 =====
+// 为什么不能直接 fetch(url)：浏览器跨域读不到别人的网页（对方不给 CORS 头），
+// 而且百科类站点还会拦爬虫（实测百度直接 403）。所以必须借一层代理。
+// 这里不绑定任何具体服务：用户填一个 URL 模板，{url} 会被替换成目标链接。
+
+// 从 HTML 里挑出正文：先删噪点，再按「段落文字量」给容器打分，取最高的那个
+function extractMainText(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('script,style,noscript,iframe,svg,nav,header,footer,aside,form,button')
+        .forEach(el => el.remove());
+
+    let best = doc.body;
+    let bestScore = 0;
+    doc.querySelectorAll('article,main,section,div').forEach(el => {
+        let score = 0;
+        el.querySelectorAll(':scope > p').forEach(p => { score += (p.textContent || '').trim().length; });
+        // 直接子段落为主；整块也算一部分权重，避免正文被包在多层 div 里漏掉
+        score += el.textContent ? Math.min(el.textContent.length / 50, 200) : 0;
+        if (score > bestScore) { bestScore = score; best = el; }
+    });
+
+    const blocks = Array.from(best.querySelectorAll('p,h1,h2,h3,h4,li,blockquote'));
+    let text = blocks.length
+        ? blocks.map(b => (b.textContent || '').trim()).filter(s => s.length > 1).join('\n\n')
+        : (best.textContent || '');
+
+    return text
+        .replace(/\r/g, '')
+        .replace(/[ \t\u00a0]+/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+async function fetchArticleText(url) {
+    const cfg = await getResearchConfig();
+    if (!cfg.reader) throw new Error('还没配正文抓取代理');
+
+    const target = cfg.reader.includes('{url}')
+        ? cfg.reader.replace('{url}', encodeURIComponent(url))
+        : cfg.reader + encodeURIComponent(url);
+
+    const res = await fetch(target);
+    if (!res.ok) throw new Error(`抓取服务返回 ${res.status}`);
+    const raw = await res.text();
+    const text = raw.trim().startsWith('<') ? extractMainText(raw) : raw.trim();
+    if (text.length < 60) throw new Error('没抓到正文（可能被反爬或需要登录）');
+    return text.slice(0, 8000);
+}
+
+async function researchFetchOne(i, quiet = false) {
+    const it = researchState.items[i];
+    if (!it || !it.url) return false;
+    if (it.fullText) { if (!quiet) ui.showToast('这篇已经有正文了'); return true; }
+    try {
+        let text = await fetchArticleText(it.url);
+        // 正文开头常重复一遍标题（h1），去掉，免得资料库里标题出现两遍。
+        // 标题常带站点后缀（"锦衣卫 - 百度百科"），所以用「包含」而不是「相等」来判断
+        const title = (it.title || '').trim();
+        const lines = text.split('\n');
+        const first = (lines[0] || '').trim();
+        if (lines.length > 1 && first.length <= 30 && title.includes(first)) {
+            text = lines.slice(1).join('\n').trim();
+        }
+        it.fullText = text;
+        renderResearchResults();
+        if (!quiet) ui.showToast(`已抓到正文 ${text.length} 字`);
+        return true;
+    } catch (e) {
+        if (!quiet) {
+            ui.showToast(e.message);
+            if (/还没配正文抓取代理/.test(e.message)) openResearchConfig();
+        }
+        return false;
+    }
+}
+
+async function researchFetchPicked() {
+    const idx = Array.from(researchState.picked).sort((a, b) => a - b);
+    if (!idx.length) { ui.showToast('还没勾选内容'); return; }
+    const cfg = await getResearchConfig();
+    if (!cfg.reader) { ui.showToast('还没配正文抓取代理'); openResearchConfig(); return; }
+
+    let ok = 0, fail = 0;
+    for (const i of idx) {
+        if (researchState.items[i] && researchState.items[i].fullText) { ok++; continue; }
+        const box = rsEl('#rs-results');
+        if (box) box.classList.add('rs-busy');
+        const done = await researchFetchOne(i, true);
+        done ? ok++ : fail++;
+    }
+    const box = rsEl('#rs-results');
+    if (box) box.classList.remove('rs-busy');
+    ui.showToast(`抓取完成：成功 ${ok} 篇${fail ? `，失败 ${fail} 篇` : ''}`);
+}
+
 // ===== 沉淀：写进作品资料库 =====
 // 复用 worldbuilding 存储（category='research'），这样世界观页能直接看到、编辑、删除
 async function researchSinkItems(novelId, items, query) {
     if (!novelId) throw new Error('请先选择作品');
     let saved = 0;
     for (const it of items) {
+        // 抓到正文就用正文，没抓到退回摘要
+        const body = (it.fullText || it.snippet || '').trim();
         const content = [
-            it.snippet || '',
+            body,
             it.url ? `来源：${it.url}` : ''
         ].filter(Boolean).join('\n\n');
 
@@ -158,6 +259,7 @@ async function researchSinkItems(novelId, items, query) {
             keywords: buildResearchKeywords(it, query),
             source: { url: it.url || '', site: it.site || '', date: it.date || '' },
             query: query || '',
+            fetched: !!it.fullText,
             created: Date.now(),
             updated: Date.now()
         });
@@ -261,6 +363,13 @@ async function runResearchSearch() {
         researchState.query = q;
         researchState.picked = new Set(items.map((_, i) => i));   // 默认全选，用户再取消
         renderResearchResults();
+
+        // 开了「自动抓正文」就直接抓，省一步点击
+        const cfg = await getResearchConfig();
+        if (cfg.autoFetch && cfg.reader) {
+            ui.showToast('正在抓取正文…');
+            await researchFetchPicked();
+        }
     } catch (e) {
         if (box) box.innerHTML = `<div class="rs-error">${escapeHtml(e.message)}</div>`;
         ui.showToast('检索失败');
@@ -285,22 +394,29 @@ function renderResearchResults() {
             <button class="rs-link" onclick="researchPickAll(false)">清空</button>
         </div>
         <div class="rs-list">
-            ${items.map((it, i) => `
+            ${items.map((it, i) => {
+                const hasBody = !!it.fullText;
+                const preview = (it.fullText || it.snippet || '');
+                return `
                 <div class="rs-item ${researchState.picked.has(i) ? 'on' : ''}" onclick="researchTogglePick(${i})">
                     <div class="rs-check">${researchState.picked.has(i) ? '✓' : ''}</div>
                     <div class="rs-body">
                         <div class="rs-title">${escapeHtml(it.title || '未命名')}</div>
-                        <div class="rs-snippet">${escapeHtml((it.snippet || '').slice(0, 220))}${(it.snippet || '').length > 220 ? '…' : ''}</div>
+                        <div class="rs-snippet">${escapeHtml(preview.slice(0, 220))}${preview.length > 220 ? '…' : ''}</div>
                         <div class="rs-meta">
                             ${it.site ? `<span class="rs-site">${escapeHtml(it.site)}</span>` : ''}
                             ${it.date ? `<span>${escapeHtml(String(it.date).slice(0, 10))}</span>` : ''}
+                            ${hasBody ? `<span class="rs-badge">正文 ${it.fullText.length} 字</span>` : ''}
                             ${it.url ? `<a class="rs-url" href="${escapeAttr(it.url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">原文</a>` : ''}
+                            ${it.url && !hasBody ? `<button class="rs-fetch" onclick="event.stopPropagation();researchFetchOne(${i})">抓正文</button>` : ''}
                         </div>
                     </div>
-                </div>`).join('')}
+                </div>`;
+            }).join('')}
         </div>
         <div class="rs-actions">
             ${researchState.fromEditor ? `<button class="btn btn-outline" onclick="researchInsert()" ${researchState.picked.size ? '' : 'disabled'}>插入正文</button>` : ''}
+            <button class="btn btn-outline" onclick="researchFetchPicked()" ${researchState.picked.size ? '' : 'disabled'}>抓正文</button>
             <button class="btn btn-primary" onclick="researchSink()" ${(researchState.picked.size && !novelless) ? '' : 'disabled'}>
                 ${novelless ? '先建一部作品' : `存入资料库（${researchState.picked.size}）`}
             </button>
@@ -377,6 +493,18 @@ async function openResearchConfig() {
                 <input class="rs-input" id="rs-key" type="password" placeholder="只存在本机，不会上传"
                        value="${escapeAttr(cfg.apiKey || '')}">
                 <div class="rs-cfg-tip">Key 存本机 IndexedDB；导出备份时会自动清空。</div>
+
+                <div class="rs-cfg-label" style="margin-top:16px">正文抓取代理（可选）</div>
+                <input class="rs-input" id="rs-reader" placeholder="https://你的代理/?url={url}"
+                       value="${escapeAttr(cfg.reader || '')}">
+                <div class="rs-cfg-tip">
+                    搜索只给摘要，写资料要正文。浏览器读不了别人的网页，得走一层代理，<code>{url}</code> 会替换成目标链接。
+                    <button class="rs-link" onclick="showReaderHelp()">怎么弄</button>
+                </div>
+                <label class="rs-check-line">
+                    <input type="checkbox" id="rs-auto" ${cfg.autoFetch ? 'checked' : ''}>
+                    <span>搜索后自动抓正文</span>
+                </label>
             </div>
 
             <div class="rs-cfg-tip" id="rs-builtin-tip" style="margin-top:12px;display:none">
@@ -417,13 +545,49 @@ async function saveResearchConfig() {
     const mode = modeEl ? modeEl.value : 'off';
     const provider = (document.getElementById('rs-provider') || {}).value || 'bocha';
     const apiKey = ((document.getElementById('rs-key') || {}).value || '').trim();
+    const reader = ((document.getElementById('rs-reader') || {}).value || '').trim();
+    const autoFetch = !!(document.getElementById('rs-auto') || {}).checked;
 
     if (mode === 'api' && !apiKey) { ui.showToast('选了搜索 API，但还没填 Key'); return; }
+    if (reader && !/^https?:\/\//.test(reader)) { ui.showToast('抓取代理地址要以 http(s):// 开头'); return; }
 
-    await setResearchConfig({ mode, provider, apiKey, count: 6 });
+    await setResearchConfig({ mode, provider, apiKey, reader, autoFetch, count: 6 });
     closeModal();
     ui.showToast('已保存');
     if (store.currentPage === 'research') navigateTo('research', {}, true);
+}
+
+// 代理不会自动生成，得让用户能五分钟搞定，否则这个功能就是死的
+function showReaderHelp() {
+    createModal('怎么配正文抓取', `
+        <div class="rs-help">
+            <p>浏览器出于安全限制读不了别人的网站，必须有一个"代你抓"的地址。两种办法：</p>
+
+            <b>一、用 Cloudflare Workers（免费，推荐）</b>
+            <p>新建一个 Worker，贴下面这段，部署后把地址填进「正文抓取代理」：</p>
+<pre><code>export default {
+  async fetch(req) {
+    const u = new URL(req.url).searchParams.get("url");
+    if (!u) return new Response("missing url", { status: 400 });
+    const r = await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" } });
+    return new Response(await r.text(), {
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "text/html; charset=utf-8"
+      }
+    });
+  }
+}</code></pre>
+            <p>填的格式：<code>https://你的子域.workers.dev/?url={url}</code></p>
+
+            <b>二、用现成的抓取服务</b>
+            <p>Firecrawl、Jina Reader 这类服务也能把网页转成纯文本。把它们的接口地址按 <code>{url}</code> 占位填进来即可。注意 Jina 在国内多数网络下直连超时，用之前先自己测一下。</p>
+
+            <b>不配也能用</b>
+            <p>搜索结果里的摘要（博查通常几百字）会直接存进资料库；只是拿不到整篇正文。</p>
+        </div>
+        <div class="rs-cfg-actions"><button class="btn btn-primary" onclick="closeModal()">知道了</button></div>
+    `).show();
 }
 
 // ===== 从编辑器/对话直接调起（底部抽屉式） =====
@@ -493,7 +657,18 @@ async function showResearchSheet(novelId) {
     .rs-cfg-block{margin-top:14px;padding:14px;border:1px solid #eee;border-radius:10px;background:#fafafa}
     .rs-cfg-tip{font-size:11.5px;color:#a0a0a0;line-height:1.6;margin-top:6px}
     .rs-cfg-actions{display:flex;gap:10px;margin-top:18px}
-    .rs-cfg-actions .btn{flex:1}`;
+    .rs-cfg-actions .btn{flex:1}
+    .rs-badge{background:#eef0ff;color:#5b5fd6;padding:1px 6px;border-radius:4px;font-size:11px}
+    .rs-fetch{background:none;border:1px dashed #c9c9e8;color:#5b5fd6;border-radius:6px;padding:2px 8px;font-size:11.5px;cursor:pointer;font-family:inherit}
+    .rs-fetch:active{background:#f2f2ff}
+    .rs-check-line{display:flex;align-items:center;gap:8px;font-size:13px;margin-top:12px;color:#5f5f5f}
+    .rs-busy{opacity:.55;pointer-events:none}
+    .rs-help{font-size:13.5px;line-height:1.8;color:#4a4740}
+    .rs-help b{display:block;margin:16px 0 4px;font-size:14px;color:#1b1a17}
+    .rs-help p{margin:6px 0}
+    .rs-help pre{background:#232019;color:#e8e2d4;padding:12px;border-radius:8px;overflow-x:auto;font-size:11px;line-height:1.6;font-family:ui-monospace,Menlo,monospace}
+    .rs-help p code,.rs-help li code{background:#ece7db;padding:1px 4px;border-radius:3px;font-size:12px;color:#1b1a17}
+    .rs-help pre code{background:none;padding:0;color:inherit;font-size:inherit;white-space:pre;}`;
     document.head.appendChild(s);
 })();
 
