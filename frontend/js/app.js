@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.18.0',   // 与 package.json 保持一致
+    VERSION: '2.18.1',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1639,7 +1639,7 @@ async function renderChat(container) {
         <!-- 整合式底部输入区 -->
         <div class="chat-composer">
             <div class="composer-top">
-                <button class="composer-search-btn" id="chat-websearch-btn" onclick="showWebSearch()">🌐 联网搜索</button>
+                <button class="composer-search-btn" id="chat-websearch-btn" onclick="showWebSearch()">联网</button>
             </div>
             <div class="composer-input-box">
                 <textarea class="composer-textarea" id="chat-input" rows="1"
@@ -1650,8 +1650,7 @@ async function renderChat(container) {
                 <button class="composer-btn" onclick="openSkillPicker()">@ 技能</button>
                 <button class="composer-btn" onclick="attachFile()"># 文件</button>
                 <button class="composer-btn" onclick="showModelIndicator()">${ICON_GEAR} 默认</button>
-                <button class="composer-btn" onclick="showMemory()" title="设定集">${ICON_BOOK}</button>
-                <button class="composer-btn" onclick="rollDice()" title="随机">${ICON_DICE}</button>
+                <button class="composer-btn" onclick="showMemory()">设定</button>
                 <button class="composer-send" id="chat-send-btn" onclick="sendMessage()">➤</button>
             </div>
         </div>
@@ -1907,7 +1906,7 @@ async function sendMessage() {
         if (webHits.length) {
             const sites = webHits.slice(0, 3).map(h => escapeHtml(h.site || h.title || '来源')).join('、');
             aiLoading.insertAdjacentHTML('afterend',
-                `<div class="web-src">🌐 已检索 ${webHits.length} 条：${sites}${webHits.length > 3 ? ' 等' : ''}</div>`);
+                `<div class="web-src">已联网检索 ${webHits.length} 条：${sites}${webHits.length > 3 ? ' 等' : ''}</div>`);
         }
 
         // 保存消息（去掉设定块，保留干净正文）
@@ -2401,7 +2400,8 @@ function renderWebSearchBtn() {
     const b = document.getElementById('chat-websearch-btn');
     if (!b) return;
     b.classList.toggle('on', !!store.webSearchOn);
-    b.textContent = store.webSearchOn ? '🌐 联网中' : '🌐 联网搜索';
+    b.textContent = store.webSearchOn ? '联网中' : '联网';
+    b.classList.toggle('on', !!store.webSearchOn);
 }
 
 // 把检索结果压成一段可注入的事实依据。压缩到 500 字/条：
