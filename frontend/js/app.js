@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.11.0',   // 与 package.json 保持一致
+    VERSION: '2.12.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -133,9 +133,15 @@ const db = {
         // 导入时若检测到缺失的 Key，保留设备本机原有的配置。
         if (Array.isArray(result.settings)) {
             result.settings = result.settings.map((item) => {
-                if (!item || item.key !== 'modelConfig' || !item.value) return item;
-                const redacted = { ...item, value: { ...item.value, apiKey: '' } };
-                return redacted;
+                if (!item || !item.value) return item;
+                // API Key 与 WebDAV 密码都不进备份文件
+                if (item.key === 'modelConfig') {
+                    return { ...item, value: { ...item.value, apiKey: '' } };
+                }
+                if (item.key === 'syncConfig') {
+                    return { ...item, value: { ...item.value, pass: '', password: '' } };
+                }
+                return item;
             });
         }
         return {
@@ -154,13 +160,14 @@ const db = {
     //    一个带引号的 id 就能从数据变成脚本。
     SAFE_ID: /^[A-Za-z0-9_-]{1,80}$/,
     sanitizeImport(store, records) {
-        const dropped = { bad: 0, modelConfig: 0 };
+        const dropped = { bad: 0, modelConfig: 0, syncConfig: 0 };
         const out = [];
         for (const r of records) {
             if (!r || typeof r !== 'object') { dropped.bad++; continue; }
 
             if (store === 'settings') {
                 if (r.key === 'modelConfig') { dropped.modelConfig++; continue; }  // 保留本机配置
+                if (r.key === 'syncConfig') { dropped.syncConfig = (dropped.syncConfig || 0) + 1; continue; }  // 同上，同步地址同样不能被接管
                 if (typeof r.key !== 'string' || !this.SAFE_ID.test(r.key)) { dropped.bad++; continue; }
                 out.push(r);
                 continue;
@@ -179,9 +186,16 @@ const db = {
     async importAll(backup) {
         const database = await this.open();
         const stores = backup && backup.stores ? backup.stores : backup || {};
-        const total = { imported: 0, dropped: 0, droppedModel: 0 };
-        // 导入会清空 settings，所以先把本机的模型配置拿出来，写完再放回去
-        const localModelConfig = await this.get('settings', 'modelConfig');
+        const total = { imported: 0, dropped: 0, droppedModel: 0, droppedSync: 0 };
+        // 导入会清空 settings 整表。这些键描述的是「这台设备」，不是书的内容，
+        // 必须原样保留：否则导一次备份，Key、同步地址、听到第几句、回滚点全没了。
+        const LOCAL_KEYS = ['modelConfig', 'syncConfig', 'syncMeta', 'preSyncBackup',
+                            'deviceId', 'listenPos', 'lastBackupAt', 'backupRemindLaterAt'];
+        const localSettings = [];
+        for (const key of LOCAL_KEYS) {
+            const rec = await this.get('settings', key);
+            if (rec) localSettings.push(rec);
+        }
 
         for (const store of this.STORES) {
             if (!database.objectStoreNames.contains(store)) continue;
@@ -192,6 +206,7 @@ const db = {
             total.imported += prepared.length;
             total.dropped += dropped.bad;
             total.droppedModel += dropped.modelConfig;
+            total.droppedSync += dropped.syncConfig || 0;
 
             // 先写临时校验再清空：逐条 put 前已经筛过，避免「清空到一半失败」后新旧都没了
             const tx = database.transaction(store, 'readwrite');
@@ -200,8 +215,8 @@ const db = {
                 os.clear();
                 try {
                     prepared.forEach(r => os.put(r));
-                    // 本机模型配置（含 Key）不在备份里，清库后必须补回去
-                    if (store === 'settings' && localModelConfig) os.put(localModelConfig);
+                    // 本机专属设置补回去（含 Key、同步配置、回滚点）
+                    if (store === 'settings') localSettings.forEach(rec => os.put(rec));
                 } catch (e) { reject(e); return; }
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
@@ -1471,6 +1486,8 @@ function navigateTo(page, params = {}, isRootTab = false) {
         chapterSort: (view) => renderChapterSort(view, params.novelId),
         // 听稿校对
         listen: (view) => renderListen(view, params.novelId, params.chapterNum),
+        // 多设备同步
+        sync: renderSync,
         // 节拍控制
         beatControl: (view) => renderBeatControl(view, params.novelId, params.chapterNum),
         // 角色卡
@@ -3079,6 +3096,16 @@ async function renderSettings(container) {
                 </div>
                 <span class="settings-arrow">›</span>
             </div>
+            <div class="settings-item" onclick="navigateTo('sync')">
+                <div class="settings-item-left">
+                    <div class="settings-icon"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-9 9M3 12a9 9 0 0 1 9-9"/><path d="M3 12a9 9 0 0 0 9 9"/><path d="M12 3v18"/><path d="M8 7l4-4 4 4M8 17l4 4 4-4"/></svg></div>
+                    <div>
+                        <div class="settings-label">多设备同步</div>
+                        <div class="settings-value">WebDAV 快照同步，换机不丢稿</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
             <div class="settings-item" onclick="navigateTo('dataManage')">
                 <div class="settings-item-left">
                     <div class="settings-icon"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></div>
@@ -3342,6 +3369,7 @@ function handleImportFile(input) {
             const r = await db.importAll(data);
             let msg = `已恢复 ${r.imported} 条`;
             if (r.droppedModel) msg += '，模型配置已保留本机设置';
+            if (r.droppedSync) msg += '，同步配置已保留本机设置';
             if (r.dropped) msg += `，过滤 ${r.dropped} 条异常记录`;
             ui.showToast(msg, 3500);
             input.value = '';
@@ -4308,6 +4336,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 原生壳能力：启动图、状态栏、返回键（网页环境自动跳过）
     initNativeShell();
+
+    // 配置过同步的话，启动后静默看一眼云端有没有新版本（失败不打扰）
+    if (typeof maybeAutoCheckSync === 'function') setTimeout(() => maybeAutoCheckSync(), 2500);
 });
 
 // Prevent double-tap zoom
