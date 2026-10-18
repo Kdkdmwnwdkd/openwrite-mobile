@@ -21,7 +21,11 @@ https://gh-proxy.com/https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/la
 | CDN（版本化） | `https://testingcf.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk` | 1.05 MB/s |
 | 原始（GitHub） | [app-debug.apk](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/latest/download/app-debug.apk) | 18 KB/s |
 
-> 这是 debug 签名包（仅供测试，不适合正式分发）。当前版本号见 `package.json` / 应用「设置 → 关于」。
+> 这是**自有签名**的测试包（`CN=OpenWrite Mobile`），签名从此固定。
+> 证书 SHA-1：`8D:3B:FC:52:A9:99:2A:5C:A2:D4:F5:BF:23:4F:61:82:F0:FF:CF:BC`
+>
+> **v2.18.0 换了签名，必须先卸载旧版再装**，否则会报「签名不一致 / 应用未安装」。
+> 卸载前记得先导出备份（设置 → 数据管理），装好后再导入。从这一版起不用再卸载了。
 
 ### 这两条通道怎么来的
 

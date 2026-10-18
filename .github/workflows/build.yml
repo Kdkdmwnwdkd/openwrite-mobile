@@ -79,6 +79,18 @@ jobs:
           ./gradlew clean
           ./gradlew assembleDebug
 
+      # 签名一旦漂移，用户装机就会报「签名不一致」，而报错发生在手机上，排查很麻烦。
+      # 这里把证书指纹打进日志，一眼能对上。
+      - name: Verify signing certificate
+        run: |
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          APKSIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          if [ -x "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --print-certs "$APK" | head -6
+          else
+            echo "apksigner 不存在，跳过校验"
+          fi
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:

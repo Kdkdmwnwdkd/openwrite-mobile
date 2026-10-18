@@ -4938,3 +4938,25 @@ body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary
 /* 书架统计行：数字和标签挨太紧，读起来像「1作品总数」 */
 .stat-card + .stat-card { margin-left: 10px; }
 .stat-card-value { margin-right: 2px; }
+
+/* ===== 聊天首页尺寸收敛（v2.18.0）=====
+   三张卡片原来 96px 高、图标 36px，一屏三张就把输入框挤走了。
+   收小但保留 44px 以上的可点面积，手指不误触。 */
+.chat-action-card { padding: 11px 13px; gap: 10px; border-radius: 12px; }
+.chat-action-icon { width: 30px; height: 30px; border-radius: 8px; }
+.chat-action-icon svg { width: 16px; height: 16px; }
+.chat-action-title { font-size: 14.5px; margin-bottom: 2px; }
+.chat-action-desc { font-size: 11.5px; }
+.chat-action-arrow { font-size: 17px; }
+.chat-action-list { gap: 9px; }
+
+.chat-tool-pill { padding: 6px 11px; font-size: 12px; }
+.tool-pill-icon svg { width: 12px; height: 12px; }
+.composer-btn { padding: 5px 8px; font-size: 11px; }
+.composer-send { width: 32px; height: 32px; }
+
+/* hero 区也收一收，让三张卡完整露在首屏 */
+.chat-hero { padding: 6px 0 4px; }
+.chat-hero-logo svg { width: 34px; height: 34px; }
+.chat-hero-title { font-size: 19px; }
+.chat-hero-subtitle { font-size: 11.5px; }
