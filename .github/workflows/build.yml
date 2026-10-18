@@ -137,11 +137,11 @@ jobs:
 
           rm -rf /tmp/distrepo && mkdir -p /tmp/distrepo/apk
           cd /tmp/distrepo
-          # 同时放两份：
-          #   app-debug.apk   固定名，方便分享，但 jsDelivr 对同名路径有长缓存，会滞后
-          #   app-<版本>.apk  路径每次不同，必定回源，发版后立即生效
+          # 只放带版本号的文件名。
+          # 实测 jsDelivr 对同一路径（apk/app-debug.apk）有源站级长缓存，
+          # purge 清不掉，发版后仍会返回上一版——那比慢更糟，会让人装到旧包。
+          # 带版本号的路径每次不同，必定回源，立即拿到新包。
           cp "$GITHUB_WORKSPACE/$APK" "apk/app-${VERSION}.apk"
-          cp "$GITHUB_WORKSPACE/$APK" apk/app-debug.apk
           {
             echo "OpenWrite Android 安装包（自动同步，勿手改）"
             echo
@@ -156,13 +156,9 @@ jobs:
           git init -q
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git add -f "apk/app-${VERSION}.apk" apk/app-debug.apk apk/README.md
+          git add -f "apk/app-${VERSION}.apk" apk/README.md
           git commit -q -m "dist: v${VERSION} ${GITHUB_SHA::7}"
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:dist
 
-          # 带版本的新路径本身不会命中旧缓存，但仍清一次固定名，让它尽快跟上
           echo "purging CDN cache..."
-          for f in "apk/app-debug.apk" "apk/app-${VERSION}.apk" "apk/README.md"; do
-            curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@dist/$f" | head -c 200 || true
-            echo
-          done
+          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@dist/apk/app-${VERSION}.apk" | head -c 200 || true

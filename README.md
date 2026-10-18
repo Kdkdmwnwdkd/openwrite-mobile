@@ -6,24 +6,29 @@
 
 ## 最新版本下载
 
-每次 push 到 `master`，GitHub Actions 会自动构建，同时更新 Release 和 CDN 镜像两条通道。
+每次 push 到 `master`，GitHub Actions 会自动构建，并同步到下面几条通道。
 
-| 通道 | 地址 | 国内速度 |
+**一条永远指向最新版、且国内能跑满带宽的链接：**
+
+```
+https://ghfast.top/https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/latest/download/app-debug.apk
+```
+
+`releases/latest` 由 GitHub 保证指向最新 release，前面拼一个镜像域名即走加速，**发版后不用改链接**。
+
+| 通道 | 地址 | 国内实测 |
 |------|------|----------|
-| **CDN 加速（推荐）** | https://testingcf.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk | 约 900 KB/s |
-| 备用加速 | https://gcore.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk | 约 600 KB/s |
-| 镜像 | https://ghfast.top/https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/download/nightly-debug/app-debug.apk | 约 1 MB/s |
-| 原始（GitHub） | [app-debug.apk](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/download/nightly-debug/app-debug.apk) | 约 18 KB/s |
+| **镜像 + latest（推荐）** | 见上面代码块 | 876 KB/s · 4.6s |
+| **CDN（最快）** | `https://testingcf.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk` | 1.05 MB/s · 3.9s |
+| CDN 备用 | `https://gcore.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk` | 491 KB/s |
+| 原始（GitHub） | [app-debug.apk](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/latest/download/app-debug.apk) | 18 KB/s |
 
-> CDN 地址里的 `2.14.0` 就是 `package.json` 的 version，换版本时改这一段。
-> 也可以用不带版本号的 `apk/app-debug.apk`，但它受 jsDelivr 长缓存影响，发版后可能还要几小时才更新。
-
-四个地址指向**同一个文件**，逐字节一致，随便哪个下都行。
+> CDN 地址里的 `2.14.0` 等于 `package.json` 的 version，换版本时要改这一段。
+> 为什么不用不带版本号的 `apk/app-debug.apk`：jsDelivr 对这个路径有源站级长缓存，`purge` 清不掉，发版后仍会返回上一版——宁可链接长一点，也不能让人装到旧包。
 
 > 这是 debug 签名包（仅供测试，不适合正式分发）。当前版本号见 `package.json` / 应用「设置 → 关于」。
 
-**为什么会有 CDN 这条通道**：GitHub Release 在国内直连只有十几 KB/s，4 MB 的包要等好几分钟。构建完成后会自动把 APK 推到 `dist` 分支（单提交、强制覆盖，不会让仓库越变越大），再清一次 jsDelivr 缓存，所以 `@dist` 这条链接永远是最新包。
-
+**两条通道怎么来的**：GitHub Release 在国内直连只有十几 KB/s，4 MB 的包要等三分钟。构建完成后会自动把 APK 推到 `dist` 分支（单提交、强制覆盖，仓库不会随版本膨胀），jsDelivr 再把仓库当 CDN 用。
 
 ## 功能特性
 
