@@ -1,5 +1,5 @@
 // OpenWrite Mobile Service Worker
-const CACHE_NAME = 'openwrite-mobile-v7';
+const CACHE_NAME = 'openwrite-mobile-v8';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
@@ -9,6 +9,7 @@ const STATIC_ASSETS = [
     '/js/distill.js',
     '/js/export.js',
     '/js/research.js',
+    '/js/listen.js',
     '/manifest.json',
     '/favicon.png',
     '/images/apple-touch-icon.png',

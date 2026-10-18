@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.10.1',   // 与 package.json 保持一致
+    VERSION: '2.11.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1396,6 +1396,12 @@ let pageHistory = [];
 let __suppressHistoryPush = false;   // 返回操作本身不再入栈
 
 function navigateTo(page, params = {}, isRootTab = false) {
+    // 离开听稿页要停止朗读，否则切走了还在念
+    if (store.currentPage === 'listen' && page !== 'listen' && typeof listenStop === 'function') {
+        listenStop();
+        if (typeof keepScreenAwake === 'function') keepScreenAwake(false);
+    }
+
     // 离开编辑器前先把未落盘的内容存下来（只触发一次，随后清空引用）
     if (__editorFlush) {
         const f = __editorFlush;
@@ -1463,6 +1469,8 @@ function navigateTo(page, params = {}, isRootTab = false) {
         plotSimulate: (view) => renderPlotSimulate(view, params.novelId),
         // 章节排序
         chapterSort: (view) => renderChapterSort(view, params.novelId),
+        // 听稿校对
+        listen: (view) => renderListen(view, params.novelId, params.chapterNum),
         // 节拍控制
         beatControl: (view) => renderBeatControl(view, params.novelId, params.chapterNum),
         // 角色卡
@@ -2711,6 +2719,7 @@ async function renderChapterEdit(container, novelId, chapterNum) {
             <button class="btn btn-outline" onclick="generateChapterSummary('${novelId}', ${chapterNum})">📝 生成摘要</button>
             <button class="btn btn-outline" onclick="showChapterHistory('${novelId}', ${chapterNum})">🕘 历史版本</button>
             <button class="btn btn-outline" onclick="showResearchSheet('${novelId}')">🔎 查资料</button>
+            <button class="btn btn-outline" onclick="navigateTo('listen', { novelId: '${novelId}', chapterNum: ${chapterNum} })">🎧 听稿</button>
         </div>
     `;
 
