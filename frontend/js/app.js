@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.16.0',   // 与 package.json 保持一致
+    VERSION: '2.16.1',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -2337,10 +2337,11 @@ async function showWebSearch() {
     const turningOn = !store.webSearchOn;
 
     if (turningOn) {
-        let cfg = null;
-        try { cfg = await getResearchConfig(); } catch (e) { cfg = null; }
-        if (!cfg || cfg.mode === 'off') {
-            ui.showToast('先选一种联网方式：模型自带，或搜索 API');
+        // 模型自己能联网就直接开，不拿配置页挡人。
+        // 只有既没内置能力、也没填搜索 Key 时，才需要用户做选择。
+        const picked = await resolveSearchMode();
+        if (picked.mode === 'off') {
+            ui.showToast('这个模型不能联网：换通义 / 智谱 / DeepSeek，或填一个搜索 Key', 5000);
             openResearchConfig();
             return;
         }

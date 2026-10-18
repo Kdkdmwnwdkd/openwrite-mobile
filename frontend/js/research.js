@@ -89,7 +89,93 @@ function buildBuiltinSearchPayload(config) {
     const model = String(config.model || '').toLowerCase();
     if (url.includes('dashscope') || model.startsWith('qwen')) return { enable_search: true };
     if (url.includes('bigmodel') || model.startsWith('glm')) return { tools: [{ type: 'web_search' }] };
+    // DeepSeek 的服务端搜索只存在于 Responses 端点（/responses），
+    // chat/completions 带这个工具会被 400 拒掉，所以单独走一条路，见 deepseekWebSearch
+    if (url.includes('deepseek') || model.startsWith('deepseek')) return { __responses: true };
     return null;
+}
+
+// 当前模型能不能自己联网。能的话，用户不需要配任何搜索服务。
+async function currentModelSupportsBuiltin() {
+    try {
+        const mc = await settings.getModelConfig();
+        return !!buildBuiltinSearchPayload(mc);
+    } catch (e) {
+        return false;
+    }
+}
+
+// 决定这次搜索走哪条路：
+// 模型自带联网 > 用户填的搜索 API > 没得用
+// 这样只要模型支持，"点一下就能搜"，不必先去配置页选模式
+async function resolveSearchMode() {
+    const cfg = await getResearchConfig();
+    if (cfg.mode === 'api' && cfg.apiKey) return { mode: 'api', cfg };
+    if (await currentModelSupportsBuiltin()) return { mode: 'builtin', cfg };
+    if (cfg.mode === 'api') return { mode: 'api', cfg };   // 选了 API 但没填 key，让它抛错更明确
+    return { mode: 'off', cfg };
+}
+
+// DeepSeek 的联网搜索：一次请求内完成 search → open_page → 回答。
+// 结果不可见（服务端注入），但 open_page 的 URL 会回传，可以当来源。
+async function deepseekWebSearch(query) {
+    const mc = await settings.getModelConfig();
+    if (!mc || !mc.apiKey) throw new Error('还没配置模型 Key');
+
+    let base = String(mc.baseUrl || 'https://api.deepseek.com').replace(/\/+$/, '');
+    if (base.endsWith('/v1')) base = base.slice(0, -3);
+
+    // 搜索能力只挂在 v4-flash 上；用户配的若是别的模型，仍按 v4-flash 请求
+    const model = /v4/i.test(mc.model || '') ? mc.model : 'deepseek-v4-flash';
+
+    const res = await fetch(`${base}/responses`, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${mc.apiKey}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            model,
+            input: query,
+            tools: [{ type: 'web_search' }],
+            store: false
+        })
+    });
+
+    if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        let hint = '';
+        if (res.status === 400) hint = '（DeepSeek 联网搜索需要 deepseek-v4-flash 模型）';
+        if (res.status === 404) hint = '（当前接口没有 /responses，请把地址填成 https://api.deepseek.com）';
+        throw new Error(`DeepSeek 联网返回 ${res.status}${hint}${detail ? '：' + detail.slice(0, 100) : ''}`);
+    }
+
+    const data = await res.json();
+    const items = data.output || [];
+    let text = '';
+    const urls = [];
+    for (const it of items) {
+        if (it.type === 'message' && Array.isArray(it.content)) {
+            for (const c of it.content) {
+                if (c.type === 'output_text' && c.text) text += c.text;
+            }
+        }
+        if (it.type === 'web_search_call' && it.action && it.action.type === 'open_page' && it.action.url) {
+            urls.push(it.action.url);
+        }
+    }
+
+    text = text.trim();
+    if (!text) throw new Error('联网没有返回内容，换个问法再试');
+
+    return [{
+        title: 'DeepSeek 联网检索',
+        url: urls[0] || '',
+        site: urls[0] ? hostOf(urls[0]) : 'DeepSeek 服务端搜索',
+        snippet: text,
+        date: '',
+        kind: 'answer'
+    }];
 }
 
 // ===== 搜索 =====
@@ -119,6 +205,7 @@ async function researchSearchBuiltin(query) {
     if (!payload) {
         throw new Error('当前模型没有内置联网能力，请到「查资料 → 配置」改用搜索 API 模式');
     }
+    if (payload.__responses) return await deepseekWebSearch(query);
     const text = await ai.chat([
         { role: 'system', content: '你是资料检索助手。请联网核实后回答，只给事实与关键数据，注明出处名称与年份，不要编造。控制在 400 字内。' },
         { role: 'user', content: query }
@@ -135,9 +222,9 @@ async function researchSearchBuiltin(query) {
 }
 
 async function researchSearch(query) {
-    const cfg = await getResearchConfig();
-    if (cfg.mode === 'off') throw new Error('还没开启查资料，请先到配置里选一种方式');
-    if (cfg.mode === 'builtin') return await researchSearchBuiltin(query);
+    const { mode, cfg } = await resolveSearchMode();
+    if (mode === 'off') throw new Error('当前模型没有联网能力，需要配一个搜索 API');
+    if (mode === 'builtin') return await researchSearchBuiltin(query);
     return await researchSearchApi(query, cfg);
 }
 
@@ -375,9 +462,13 @@ async function renderResearch(container) {
         researchState.novelId = (novels[0] && novels[0].id) || null;
     }
 
-    const modeText = cfg.mode === 'off' ? '未开启'
-        : cfg.mode === 'builtin' ? '模型内置联网'
-        : (RESEARCH_PROVIDERS[cfg.provider] || {}).label || cfg.provider;
+    // 状态按「实际会走的通道」显示。模型自带联网时如果还写"未开启"，会把人误导走。
+    const resolved = await resolveSearchMode();
+    const mc = await settings.getModelConfig().catch(() => null);
+    const modeText = resolved.mode === 'off' ? '未开启（当前模型不能联网）'
+        : resolved.mode === 'builtin'
+            ? `${(mc && mc.model) || '模型'} 自带联网`
+            : (RESEARCH_PROVIDERS[resolved.cfg.provider] || {}).label || resolved.cfg.provider;
 
     const novelPicker = novels.length > 1 ? `
         <select class="rs-novel-select" onchange="researchState.novelId=this.value;renderResearchResults()">
@@ -387,7 +478,7 @@ async function renderResearch(container) {
     container.innerHTML = `
         <div class="rs-wrap">
             <div class="rs-status">
-                <span class="rs-status-dot ${cfg.mode === 'off' ? 'off' : 'on'}"></span>
+                <span class="rs-status-dot ${resolved.mode === 'off' ? 'off' : 'on'}"></span>
                 <span>${escapeHtml(modeText)}</span>
                 <button class="rs-link" onclick="openResearchConfig()">切换</button>
                 ${novelPicker ? `<span style="margin-left:auto">存入</span>${novelPicker}` : ''}
