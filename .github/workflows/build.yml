@@ -120,3 +120,40 @@ jobs:
             - Branch: ${{ github.ref_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # GitHub release 在国内直连只有十几 KB/s，手机上下个 4MB 的包要等好几分钟。
+      # 这里把同一个 APK 同步到 dist 分支，走 jsDelivr 的国内 CDN 下载。
+      # 固定文件名 + 强制单提交，分支不会越拉越大。
+      - name: Publish to dist branch (CDN mirror)
+        if: success() && github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          VERSION=$(node -p "require('./package.json').version")
+          SIZE=$(stat -c%s "$APK")
+          SHA=$(sha256sum "$APK" | awk '{print $1}')
+
+          rm -rf /tmp/distrepo && mkdir -p /tmp/distrepo/apk
+          cd /tmp/distrepo
+          cp "$GITHUB_WORKSPACE/$APK" apk/app-debug.apk
+          {
+            echo "OpenWrite Android 安装包（自动同步，勿手改）"
+            echo
+            echo "版本：v${VERSION}"
+            echo "构建：${{ github.sha }}"
+            echo "大小：${SIZE} 字节"
+            echo "SHA-256：${SHA}"
+          } > apk/README.md
+
+          git init -q
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add -f apk/app-debug.apk apk/README.md
+          git commit -q -m "dist: v${VERSION} ${GITHUB_SHA::7}"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:dist
+
+          # 分支更新后 jsDelivr 仍会返回旧缓存，必须主动清一次
+          echo "purging CDN cache..."
+          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@dist/apk/app-debug.apk" | head -c 400 || true

@@ -6,13 +6,21 @@
 
 ## 最新版本下载
 
-每次 push 到 `master`，GitHub Actions 会自动构建并更新以下 Release：
+每次 push 到 `master`，GitHub Actions 会自动构建，同时更新 Release 和 CDN 镜像两条通道。
 
-| 版本 | 更新日期 | 大小 | 下载链接 |
-|------|----------|------|----------|
-| **nightly-debug** | 2026-09-18 | 3.69 MB | [app-debug.apk](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/download/nightly-debug/app-debug.apk) |
+| 通道 | 地址 | 国内速度 |
+|------|------|----------|
+| **CDN 加速（推荐）** | https://testingcf.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-debug.apk | 约 900 KB/s |
+| 备用加速 | https://gcore.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-debug.apk | 约 600 KB/s |
+| 镜像 | https://ghfast.top/https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/download/nightly-debug/app-debug.apk | 约 1 MB/s |
+| 原始（GitHub） | [app-debug.apk](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/download/nightly-debug/app-debug.apk) | 约 18 KB/s |
+
+四个地址指向**同一个文件**，逐字节一致，随便哪个下都行。
 
 > 这是 debug 签名包（仅供测试，不适合正式分发）。当前版本号见 `package.json` / 应用「设置 → 关于」。
+
+**为什么会有 CDN 这条通道**：GitHub Release 在国内直连只有十几 KB/s，4 MB 的包要等好几分钟。构建完成后会自动把 APK 推到 `dist` 分支（单提交、强制覆盖，不会让仓库越变越大），再清一次 jsDelivr 缓存，所以 `@dist` 这条链接永远是最新包。
+
 
 ## 功能特性
 
