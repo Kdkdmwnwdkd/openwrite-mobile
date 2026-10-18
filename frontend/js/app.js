@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.10.0',   // 与 package.json 保持一致
+    VERSION: '2.10.1',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -913,10 +913,174 @@ const novelManager = {
         for (const v of versions) await db.delete('versions', v.id);
     },
 
+    // ===== 分卷（v2.10.1）=====
+    // 卷存在 novel.volumes 上，章节上用 volumeId 关联。
+    // 不新开表：备份、删除、导入都会自动带上，不用改 DB_VERSION。
+    async listVolumes(novelId) {
+        const novel = await this.get(novelId);
+        if (!novel || !Array.isArray(novel.volumes)) return [];
+        return novel.volumes.slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+    },
+
+    async createVolume(novelId, title) {
+        const novel = await this.get(novelId);
+        if (!novel) throw new Error('作品不存在');
+        if (!Array.isArray(novel.volumes)) novel.volumes = [];
+        const vol = {
+            // 加随机后缀：连续两次 createVolume 可能落在同一毫秒，只靠时间戳会撞 id，
+            // 撞了以后两卷渲染同一批章节，看起来像章节重复
+            id: `vol_${novelId}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            title: (title || '').trim() || `第${novel.volumes.length + 1}卷`,
+            order: novel.volumes.length,
+            created: Date.now()
+        };
+        novel.volumes.push(vol);
+        novel.updated = Date.now();
+        await db.put('novels', novel);
+        return vol;
+    },
+
+    async renameVolume(novelId, volumeId, title) {
+        const novel = await this.get(novelId);
+        if (!novel || !Array.isArray(novel.volumes)) throw new Error('作品不存在');
+        const vol = novel.volumes.find(v => v.id === volumeId);
+        if (!vol) throw new Error('卷不存在');
+        vol.title = (title || '').trim() || vol.title;
+        novel.updated = Date.now();
+        await db.put('novels', novel);
+        return vol;
+    },
+
+    // 删卷不删章：章节退回「未分卷」，避免误删正文
+    async deleteVolume(novelId, volumeId) {
+        const novel = await this.get(novelId);
+        if (!novel || !Array.isArray(novel.volumes)) throw new Error('作品不存在');
+        const chapters = await this.listChapters(novelId);
+        for (const ch of chapters) {
+            if (ch.volumeId === volumeId) {
+                ch.volumeId = null;
+                await db.put('chapters', ch);
+            }
+        }
+        novel.volumes = novel.volumes.filter(v => v.id !== volumeId);
+        novel.volumes.forEach((v, i) => { v.order = i; });
+        novel.updated = Date.now();
+        await db.put('novels', novel);
+        return true;
+    },
+
+    async setChapterVolume(novelId, chapterNum, volumeId) {
+        const chapter = await this.getChapter(novelId, chapterNum);
+        if (!chapter) throw new Error('章节不存在');
+        chapter.volumeId = volumeId || null;
+        chapter.updated = Date.now();
+        await db.put('chapters', chapter);
+        return chapter;
+    },
+
+    // ===== 章节重排（v2.10.1）=====
+    // 传入「旧章节号的新顺序」，例如 [3,1,2] 表示原第 3 章排到第一位。
+    // 章节号就是主键的一部分，改号必须连带重映射所有引用，
+    // 否则伏笔、节拍、版本历史、大纲节点会整体串位——这类问题不报错，只会静默错乱。
+    async reorderChapters(novelId, orderedNumbers) {
+        const database = await db.open();
+        const all = await this.listChapters(novelId);
+        if (!all.length) return false;
+        if (orderedNumbers.length !== all.length) throw new Error('章节数量不一致，请刷新后重试');
+
+        const byNum = {};
+        all.forEach(c => { byNum[c.number] = c; });
+        if (orderedNumbers.some(n => !byNum[n])) throw new Error('章节列表已变化，请刷新后重试');
+
+        const map = {};                       // 旧号 -> 新号
+        orderedNumbers.forEach((oldNum, i) => { map[oldNum] = i + 1; });
+        if (!Object.keys(map).some(k => Number(k) !== map[k])) return false;   // 没变化
+
+        // 1) 章节：先把新记录写进去，再删掉不再存在的旧主键
+        const newIds = new Set();
+        const records = orderedNumbers.map((oldNum, i) => {
+            const ch = { ...byNum[oldNum] };
+            ch.number = i + 1;
+            ch.id = `${novelId}_ch${ch.number}`;
+            newIds.add(ch.id);
+            return ch;
+        });
+        const stale = all.filter(c => !newIds.has(c.id)).map(c => c.id);
+
+        await new Promise((resolve, reject) => {
+            const tx = database.transaction('chapters', 'readwrite');
+            const os = tx.objectStore('chapters');
+            try {
+                records.forEach(r => os.put(r));
+                stale.forEach(id => os.delete(id));
+            } catch (e) { reject(e); return; }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+
+        // 2) 版本历史：chapterNum 与 chapterId 一起改
+        const versions = await db.getAll('versions');
+        const movedVersions = versions.filter(v => v.novelId === novelId && map[v.chapterNum]);
+        if (movedVersions.length) {
+            await new Promise((resolve, reject) => {
+                const tx = database.transaction('versions', 'readwrite');
+                const os = tx.objectStore('versions');
+                movedVersions.forEach(v => {
+                    v.chapterNum = map[v.chapterNum];
+                    v.chapterId = `${novelId}_ch${v.chapterNum}`;
+                    os.put(v);
+                });
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+
+        // 3) 挂在作品上的：节拍、伏笔、大纲节点
+        const novel = await this.get(novelId);
+        if (novel) {
+            if (novel.beats && typeof novel.beats === 'object') {
+                const nb = {};
+                Object.keys(novel.beats).forEach(k => {
+                    const n = Number(k);
+                    nb[map[n] || n] = novel.beats[k];
+                });
+                novel.beats = nb;
+            }
+            if (Array.isArray(novel.foreshadowing)) {
+                novel.foreshadowing.forEach(f => {
+                    if (f.plantChapter && map[f.plantChapter]) f.plantChapter = map[f.plantChapter];
+                    if (f.targetChapter && map[f.targetChapter]) f.targetChapter = map[f.targetChapter];
+                });
+            }
+            const walk = (node) => {
+                if (!node || typeof node !== 'object') return;
+                if (node.chapterNum && map[node.chapterNum]) node.chapterNum = map[node.chapterNum];
+                (node.children || []).forEach(walk);
+            };
+            if (Array.isArray(novel.outline)) novel.outline.forEach(walk);
+            else if (novel.outline) walk(novel.outline);
+
+            novel.updated = Date.now();
+            await db.put('novels', novel);
+        }
+
+        // 4) 审稿记录里如果带章节号
+        const reviews = await db.getAll('reviews');
+        for (const r of reviews) {
+            if (!r || r.novelId !== novelId) continue;
+            let dirty = false;
+            if (typeof r.chapter === 'number' && map[r.chapter]) { r.chapter = map[r.chapter]; dirty = true; }
+            if (typeof r.chapterNum === 'number' && map[r.chapterNum]) { r.chapterNum = map[r.chapterNum]; dirty = true; }
+            if (dirty) await db.put('reviews', r);
+        }
+
+        return true;
+    },
+
     // ===== 章节版本历史（v2.8.0）=====
     async archiveChapterVersion(chapter) {
         const record = {
-            id: `ver_${chapter.id}_${Date.now()}`,
+            id: `ver_${chapter.id}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
             chapterId: chapter.id,
             novelId: chapter.novelId,
             chapterNum: chapter.number,
@@ -968,7 +1132,7 @@ const novelManager = {
             outline = { id: 'root', type: 'root', title: '总纲', summary: '', children: [] };
         }
         const node = {
-            id: `note_${Date.now()}`,
+            id: makeId('note'),
             type: 'note',
             title: title || '拆书笔记',
             summary: summary || '',
@@ -1087,7 +1251,7 @@ const novelManager = {
     },
 
     async createCharacter(novelId, data) {
-        const id = `char_${novelId}_${Date.now()}`;
+        const id = makeId(`char_${novelId}`);
         const char = {
             id,
             novelId,
@@ -1162,7 +1326,7 @@ const novelManager = {
     },
 
     async createWorldbuilding(novelId, data) {
-        const id = `wb_${novelId}_${Date.now()}`;
+        const id = makeId(`wb_${novelId}`);
         const item = {
             id, novelId,
             category: data.category || 'other',
@@ -1297,6 +1461,8 @@ function navigateTo(page, params = {}, isRootTab = false) {
         outlineEditor: (view) => renderOutlineEditor(view, params.novelId),
         // 情节推演
         plotSimulate: (view) => renderPlotSimulate(view, params.novelId),
+        // 章节排序
+        chapterSort: (view) => renderChapterSort(view, params.novelId),
         // 节拍控制
         beatControl: (view) => renderBeatControl(view, params.novelId, params.chapterNum),
         // 角色卡
@@ -2117,6 +2283,7 @@ async function renderNovelDetail(container, novelId) {
         // 此前只按扁数组读，保存过树形大纲的作品进详情页直接「outlineItems.map is not a function」
         const outlineItems = getFlatOutlineItems(novel);
         const characters = novel.characters || [];
+        const volumes = await novelManager.listVolumes(novelId);
         
         container.innerHTML = `
             <div class="novel-header-card">
@@ -2199,24 +2366,294 @@ async function renderNovelDetail(container, novelId) {
                         <span class="tree-toggle">▼</span>
                         <span class="tree-icon">📝</span>
                         <span class="tree-label">正文</span>
-                        <span class="tree-count">${chapters.length}章</span>
+                        <span class="tree-count">${chapters.length}章${volumes.length ? ` · ${volumes.length}卷` : ''}</span>
+                        <span class="tree-tools" onclick="event.stopPropagation()">
+                            <button class="tree-tool" onclick="addVolume('${novelId}')">＋卷</button>
+                            <button class="tree-tool" onclick="navigateTo('chapterSort', { novelId: '${novelId}' })">排序</button>
+                        </span>
                     </div>
                     <div class="tree-folder-content">
-                        ${chapters.length === 0
-                            ? '<div class="tree-empty">暂无章节</div>'
-                            : chapters.map(ch => `
-                                <div class="tree-file" onclick="event.stopPropagation(); navigateTo('chapterEdit', { novelId: '${novelId}', chapterNum: ${ch.number} })">
-                                    <span class="tree-file-icon">📄</span>
-                                    <span class="tree-file-name">第${ch.number}章 ${escapeHtml(ch.title || '')}</span>
-                                    <span class="tree-file-meta">${(ch.wordCount || 0).toLocaleString()}字</span>
-                                </div>
-                            `).join('')}
+                        ${buildChapterTreeHtml(chapters, volumes, novelId)}
                     </div>
                 </div>
             </div>
         `;
     } catch (err) {
         ui.showEmptyState(container, { icon: '⚠️', title: '加载失败', desc: err.message });
+    }
+}
+
+// ===== 分卷 / 章节排序（v2.10.1）=====
+function chapterRowHtml(ch, novelId) {
+    // 标题本身常带「第N章」，再前缀一次会变成「第1章 第1章」
+    const raw = (ch.title || '').trim();
+    const stripped = raw.replace(/^第\d+章\s*/, '').trim();
+    const shown = stripped || raw.replace(/^第\d+章\s*/, '') || '';
+    return `<div class="tree-file ch-row" onclick="event.stopPropagation(); navigateTo('chapterEdit', { novelId: '${novelId}', chapterNum: ${ch.number} })">
+        <span class="tree-file-icon">📄</span>
+        <span class="tree-file-name">第${ch.number}章${shown ? ' ' + escapeHtml(shown) : ''}</span>
+        <span class="tree-file-meta">${(ch.wordCount || 0).toLocaleString()}字</span>
+        <button class="ch-more" onclick="event.stopPropagation(); showChapterActions('${novelId}', ${ch.number})">⋯</button>
+    </div>`;
+}
+
+function buildChapterTreeHtml(chapters, volumes, novelId) {
+    if (!chapters.length) return '<div class="tree-empty">暂无章节</div>';
+    const sorted = chapters.slice().sort((a, b) => a.number - b.number);
+
+    // 没有卷时保持原来的平铺样式，老用户看不到任何变化
+    if (!volumes || !volumes.length) {
+        return sorted.map(ch => chapterRowHtml(ch, novelId)).join('');
+    }
+
+    const volIds = new Set(volumes.map(v => v.id));
+    const loose = sorted.filter(c => !c.volumeId || !volIds.has(c.volumeId));
+
+    let html = '';
+    volumes.forEach(v => {
+        const list = sorted.filter(c => c.volumeId === v.id);
+        const words = list.reduce((sum, c) => sum + (c.wordCount || 0), 0);
+        html += `<div class="vol-head" onclick="event.stopPropagation(); showVolumeActions('${novelId}', '${v.id}')">
+            <span class="vol-icon">📖</span>
+            <span class="vol-title">${escapeHtml(v.title)}</span>
+            <span class="vol-meta">${list.length}章 · ${words.toLocaleString()}字</span>
+            <span class="vol-more">⋯</span>
+        </div>`;
+        html += list.length
+            ? list.map(ch => chapterRowHtml(ch, novelId)).join('')
+            : '<div class="tree-empty vol-empty">本卷还没有章节，可从其他卷移入</div>';
+    });
+
+    if (loose.length) {
+        html += `<div class="vol-head vol-head-loose">
+            <span class="vol-icon">📄</span>
+            <span class="vol-title">未分卷</span>
+            <span class="vol-meta">${loose.length}章</span>
+        </div>`;
+        html += loose.map(ch => chapterRowHtml(ch, novelId)).join('');
+    }
+    return html;
+}
+
+function addVolume(novelId) {
+    const modal = createModal('新建卷', `
+        <div class="form-group">
+            <label class="form-label">卷名</label>
+            <input class="input" id="vol-title" placeholder="例如：第一卷 北镇抚司" maxlength="40">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeModal()">取消</button>
+            <button class="btn btn-primary" onclick="createVolumeAndRefresh('${novelId}')">创建</button>
+        </div>`);
+    modal.show();
+    setTimeout(() => { const el = document.getElementById('vol-title'); if (el) el.focus(); }, 120);
+}
+
+async function createVolumeAndRefresh(novelId) {
+    const input = document.getElementById('vol-title');
+    const title = (input && input.value || '').trim();
+    try {
+        await novelManager.createVolume(novelId, title);
+        closeModal();
+        ui.showToast('已新建卷');
+        navigateTo('novelDetail', { novelId });
+    } catch (e) {
+        ui.showToast('创建失败：' + e.message);
+    }
+}
+
+async function showVolumeActions(novelId, volumeId) {
+    const volumes = await novelManager.listVolumes(novelId);
+    const vol = volumes.find(v => v.id === volumeId);
+    if (!vol) return;
+    const chapters = await novelManager.listChapters(novelId);
+    const count = chapters.filter(c => c.volumeId === volumeId).length;
+
+    createModal(`📖 ${vol.title}`, `
+        <div class="vol-action-note">本卷 ${count} 章。删除卷不会删除章节，章节会退回「未分卷」。</div>
+        <div class="form-group">
+            <label class="form-label">卷名</label>
+            <input class="input" id="vol-rename" value="${escapeAttr(vol.title)}" maxlength="40">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-danger" onclick="deleteVolumeConfirm('${novelId}', '${volumeId}')">删除卷</button>
+            <button class="btn btn-primary" onclick="renameVolumeAndRefresh('${novelId}', '${volumeId}')">保存</button>
+        </div>`).show();
+}
+
+async function renameVolumeAndRefresh(novelId, volumeId) {
+    const input = document.getElementById('vol-rename');
+    try {
+        await novelManager.renameVolume(novelId, volumeId, (input && input.value || '').trim());
+        closeModal();
+        ui.showToast('已重命名');
+        navigateTo('novelDetail', { novelId });
+    } catch (e) {
+        ui.showToast('重命名失败：' + e.message);
+    }
+}
+
+async function deleteVolumeConfirm(novelId, volumeId) {
+    if (!confirm('确定删除这一卷？章节会保留，退回「未分卷」。')) return;
+    try {
+        await novelManager.deleteVolume(novelId, volumeId);
+        closeModal();
+        ui.showToast('已删除卷，章节已保留');
+        navigateTo('novelDetail', { novelId });
+    } catch (e) {
+        ui.showToast('删除失败：' + e.message);
+    }
+}
+
+async function showChapterActions(novelId, chapterNum) {
+    const volumes = await novelManager.listVolumes(novelId);
+    const chapter = await novelManager.getChapter(novelId, chapterNum);
+    if (!chapter) return;
+
+    const options = [`<option value="">未分卷</option>`]
+        .concat(volumes.map(v => `<option value="${escapeAttr(v.id)}" ${chapter.volumeId === v.id ? 'selected' : ''}>${escapeHtml(v.title)}</option>`))
+        .join('');
+
+    createModal(`第${chapterNum}章`, `
+        <div class="form-group">
+            <label class="form-label">所在卷</label>
+            <select class="input" id="ch-volume">${options}</select>
+        </div>
+        <div class="vol-action-note">排序（拖动调整章节顺序）在「正文 → 排序」里。</div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeModal()">取消</button>
+            <button class="btn btn-primary" onclick="moveChapterToVolume('${novelId}', ${chapterNum})">保存</button>
+        </div>`).show();
+}
+
+async function moveChapterToVolume(novelId, chapterNum) {
+    const sel = document.getElementById('ch-volume');
+    try {
+        await novelManager.setChapterVolume(novelId, chapterNum, sel ? sel.value : '');
+        closeModal();
+        ui.showToast('已更新所属卷');
+        navigateTo('novelDetail', { novelId });
+    } catch (e) {
+        ui.showToast('保存失败：' + e.message);
+    }
+}
+
+// ===== 章节排序页 =====
+let __sortState = null;
+let __sortDragBound = false;
+
+async function renderChapterSort(container, novelId) {
+    const novel = await novelManager.get(novelId);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    const chapters = (await novelManager.listChapters(novelId)).sort((a, b) => a.number - b.number);
+
+    ui.setPageTitle('调整章节顺序');
+    ui.setHeaderActions(`
+        <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
+        <button class="header-btn" onclick="saveChapterOrder('${novelId}')">保存</button>`);
+
+    if (!chapters.length) {
+        ui.showEmptyState(container, { icon: '📄', title: '还没有章节', desc: '先写几章再来排序' });
+        return;
+    }
+
+    const byNum = {};
+    chapters.forEach(c => { byNum[c.number] = c; });
+    __sortState = { novelId, order: chapters.map(c => c.number), byNum };
+
+    container.innerHTML = `
+        <div class="sort-wrap">
+            <div class="sort-tip">按住 ≡ 拖动调整顺序，或用 ↑ ↓ 微调。保存后会重新编号，伏笔、节拍、版本历史会一并跟着走。</div>
+            <div id="sort-list" class="sort-list"></div>
+        </div>`;
+
+    sortRenderList();
+    initSortDrag(container);
+}
+
+function sortRenderList() {
+    const box = document.getElementById('sort-list');
+    if (!box || !__sortState) return;
+    const st = __sortState;
+
+    box.innerHTML = st.order.map((num, i) => {
+        const ch = st.byNum[num] || {};
+        const rawTitle = (ch.title || '').trim();
+        const title = rawTitle.replace(/^第\d+章\s*/, '').trim() || rawTitle || '未命名';
+        return `<div class="sort-row" data-idx="${i}" data-num="${num}">
+            <span class="sort-handle" title="拖动排序">≡</span>
+            <span class="sort-idx">${i + 1}</span>
+            <div class="sort-main">
+                <div class="sort-title">${escapeHtml(title)}</div>
+                <div class="sort-sub">原第${num}章 · ${(ch.wordCount || 0).toLocaleString()}字</div>
+            </div>
+            <button class="sort-btn" onclick="sortMove(${i}, -1)" ${i === 0 ? 'disabled' : ''}>↑</button>
+            <button class="sort-btn" onclick="sortMove(${i}, 1)" ${i === st.order.length - 1 ? 'disabled' : ''}>↓</button>
+        </div>`;
+    }).join('');
+}
+
+function sortMove(i, delta) {
+    if (!__sortState) return;
+    const to = i + delta;
+    const arr = __sortState.order;
+    if (to < 0 || to >= arr.length) return;
+    const [m] = arr.splice(i, 1);
+    arr.splice(to, 0, m);
+    sortRenderList();
+}
+
+function initSortDrag(container) {
+    if (__sortDragBound) return;
+    __sortDragBound = true;
+    let dragIdx = -1;
+
+    document.addEventListener('pointerdown', (e) => {
+        const handle = e.target.closest && e.target.closest('.sort-handle');
+        if (!handle) return;
+        const row = handle.closest('.sort-row');
+        if (!row) return;
+        e.preventDefault();
+        dragIdx = Number(row.dataset.idx);
+        row.classList.add('sort-dragging');
+    });
+
+    document.addEventListener('pointermove', (e) => {
+        if (dragIdx < 0 || !__sortState) return;
+        e.preventDefault();
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        const row = el && el.closest ? el.closest('.sort-row') : null;
+        if (!row) return;
+        const to = Number(row.dataset.idx);
+        if (to === dragIdx) return;
+        const arr = __sortState.order;
+        const [m] = arr.splice(dragIdx, 1);
+        arr.splice(to, 0, m);
+        dragIdx = to;
+        sortRenderList();
+        const fresh = document.querySelector(`.sort-row[data-idx="${dragIdx}"]`);
+        if (fresh) fresh.classList.add('sort-dragging');
+    }, { passive: false });
+
+    const end = () => {
+        if (dragIdx >= 0) {
+            document.querySelectorAll('.sort-row.sort-dragging').forEach(el => el.classList.remove('sort-dragging'));
+            dragIdx = -1;
+        }
+    };
+    document.addEventListener('pointerup', end);
+    document.addEventListener('pointercancel', end);
+}
+
+async function saveChapterOrder(novelId) {
+    if (!__sortState) return;
+    try {
+        const changed = await novelManager.reorderChapters(novelId, __sortState.order);
+        ui.showToast(changed ? '章节已重新编号' : '顺序没有变化');
+        __sortState = null;
+        navigateTo('novelDetail', { novelId });
+    } catch (e) {
+        ui.showToast('保存失败：' + e.message, 4000);
     }
 }
 
@@ -3763,6 +4200,12 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+// 统一 id 生成：时间戳 + 随机后缀。
+// 同一毫秒内连续创建两条记录（如 AI 批量生成人物）会撞主键，put 会静默覆盖前一条。
+function makeId(prefix) {
+    return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
 // 属性值转义：escapeHtml 已覆盖引号，这里再挡一下反引号，供 onclick/option 等属性用
