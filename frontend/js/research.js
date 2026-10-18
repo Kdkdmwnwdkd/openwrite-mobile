@@ -141,6 +141,72 @@ async function researchSearch(query) {
     return await researchSearchApi(query, cfg);
 }
 
+// ===== 检索排序（BM25）=====
+// 原来判断「这段资料要不要注入」靠的是「正文里包含标题或关键词」，
+// 资料一多就会两种结果：要么全命中（关键词太短），要么全不命中（说法不一样）。
+// 这里换成 BM25 打分：中文按二元组切词，不引分词库，手机上不背额外依赖。
+
+function researchTokenize(text) {
+    const s = String(text || '').toLowerCase();
+    const tokens = [];
+
+    // 英文 / 数字按词
+    const latin = s.match(/[a-z0-9]{2,}/g);
+    if (latin) tokens.push(...latin);
+
+    // 中文按相邻两字切
+    const segs = s.replace(/[^\u4e00-\u9fa5]+/g, ' ').split(' ').filter(Boolean);
+    for (const seg of segs) {
+        if (seg.length === 1) { tokens.push(seg); continue; }
+        for (let i = 0; i < seg.length - 1; i++) tokens.push(seg.slice(i, i + 2));
+    }
+    return tokens;
+}
+
+function researchRank(queryText, items, topK = 4) {
+    if (!items || !items.length) return [];
+
+    // 查询侧裁一下，避免整章正文产生上万个词元
+    const qTokens = Array.from(new Set(researchTokenize(String(queryText || '').slice(0, 1500)))).slice(0, 600);
+    if (!qTokens.length) return [];
+
+    const docs = items.map(it => {
+        const kw = Array.isArray(it.keywords) ? it.keywords.join(' ') : '';
+        const text = `${it.title || ''} ${kw} ${(it.content || '').slice(0, 1200)}`;
+        const tokens = researchTokenize(text);
+        const tf = new Map();
+        for (const t of tokens) tf.set(t, (tf.get(t) || 0) + 1);
+        return { item: it, tf, len: tokens.length };
+    });
+
+    const N = docs.length;
+    const avgdl = (docs.reduce((s, d) => s + d.len, 0) / N) || 1;
+
+    const df = new Map();
+    for (const t of qTokens) {
+        let c = 0;
+        for (const d of docs) if (d.tf.has(t)) c++;
+        df.set(t, c);
+    }
+
+    const K1 = 1.2, B = 0.75;
+    const scored = [];
+    for (const d of docs) {
+        let score = 0;
+        for (const t of qTokens) {
+            const f = d.tf.get(t);
+            if (!f) continue;
+            const n = df.get(t);
+            const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
+            score += idf * (f * (K1 + 1)) / (f + K1 * (1 - B + B * d.len / avgdl));
+        }
+        if (score > 0) scored.push({ item: d.item, score });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, topK).map(s => s.item);
+}
+
 // ===== 正文抓取 =====
 // 为什么不能直接 fetch(url)：浏览器跨域读不到别人的网页（对方不给 CORS 头），
 // 而且百科类站点还会拦爬虫（实测百度直接 403）。所以必须借一层代理。
@@ -671,8 +737,3 @@ async function showResearchSheet(novelId) {
     .rs-help pre code{background:none;padding:0;color:inherit;font-size:inherit;white-space:pre;}`;
     document.head.appendChild(s);
 })();
-
-// HTML 属性值转义（escapeHtml 会把引号转成实体，这里只补一层保险）
-function escapeAttr(str) {
-    return escapeHtml(str).replace(/`/g, '&#96;');
-}

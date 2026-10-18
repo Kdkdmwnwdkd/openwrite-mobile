@@ -147,33 +147,68 @@ const db = {
         };
     },
 
+    // 导入前的安全过滤。
+    // 1) 一律不采用备份里的 modelConfig：备份本身已抹掉 Key，导入它只会把 baseUrl 一起带进来，
+    //    而 baseUrl 指向哪，决定了下一次调用时 Key 发给谁。
+    // 2) 记录 id 只允许安全字符：这些 id 会被拼进 onclick="fn('${id}')"，
+    //    一个带引号的 id 就能从数据变成脚本。
+    SAFE_ID: /^[A-Za-z0-9_-]{1,80}$/,
+    sanitizeImport(store, records) {
+        const dropped = { bad: 0, modelConfig: 0 };
+        const out = [];
+        for (const r of records) {
+            if (!r || typeof r !== 'object') { dropped.bad++; continue; }
+
+            if (store === 'settings') {
+                if (r.key === 'modelConfig') { dropped.modelConfig++; continue; }  // 保留本机配置
+                if (typeof r.key !== 'string' || !this.SAFE_ID.test(r.key)) { dropped.bad++; continue; }
+                out.push(r);
+                continue;
+            }
+            if (store === 'messages') {
+                if (r.sessionId && !this.SAFE_ID.test(String(r.sessionId))) { dropped.bad++; continue; }
+                out.push(r);
+                continue;
+            }
+            if (typeof r.id !== 'string' || !this.SAFE_ID.test(r.id)) { dropped.bad++; continue; }
+            out.push(r);
+        }
+        return { records: out, dropped };
+    },
+
     async importAll(backup) {
         const database = await this.open();
         const stores = backup && backup.stores ? backup.stores : backup || {};
-        // 还原 apiKey：本机已有的 Key 优先，避免备份文件带过来的空值覆盖掉真实 Key
+        const total = { imported: 0, dropped: 0, droppedModel: 0 };
+        // 导入会清空 settings，所以先把本机的模型配置拿出来，写完再放回去
         const localModelConfig = await this.get('settings', 'modelConfig');
-        const localKey = localModelConfig && localModelConfig.value ? localModelConfig.value.apiKey : '';
+
         for (const store of this.STORES) {
             if (!database.objectStoreNames.contains(store)) continue;
             const records = stores[store];
             if (!Array.isArray(records)) continue;
-            let prepared = records;
-            if (store === 'settings' && localKey) {
-                prepared = records.map((r) => {
-                    if (!r || r.key !== 'modelConfig' || !r.value || r.value.apiKey) return r;
-                    return { ...r, value: { ...r.value, apiKey: localKey } };
-                });
-            }
+
+            const { records: prepared, dropped } = this.sanitizeImport(store, records);
+            total.imported += prepared.length;
+            total.dropped += dropped.bad;
+            total.droppedModel += dropped.modelConfig;
+
+            // 先写临时校验再清空：逐条 put 前已经筛过，避免「清空到一半失败」后新旧都没了
             const tx = database.transaction(store, 'readwrite');
             const os = tx.objectStore(store);
             await new Promise((resolve, reject) => {
                 os.clear();
-                prepared.forEach(r => os.put(r));
+                try {
+                    prepared.forEach(r => os.put(r));
+                    // 本机模型配置（含 Key）不在备份里，清库后必须补回去
+                    if (store === 'settings' && localModelConfig) os.put(localModelConfig);
+                } catch (e) { reject(e); return; }
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
+                tx.onabort = () => reject(tx.error || new Error('写入被中止'));
             });
         }
-        return true;
+        return total;
     }
 };
 
@@ -374,13 +409,19 @@ async function buildLayeredContext(novelId, chapterNum, hintText = '') {
     }
 
     // 7) 参考资料：只注入本章真正提到的（查资料的成果）
-    // 不做「兜底塞前几条」——无关资料塞进去只会干扰正文。
+    // 用 BM25 排序（research.js 提供），比「包含关键词」稳得多；
+    // 资料模块没加载时退回字面匹配，保证主流程不被拖死。
     if (researchItems.length) {
-        const hitRefs = researchItems.filter(r => {
-            const keys = Array.isArray(r.keywords) ? r.keywords : [];
-            return (r.title && refText.includes(r.title)) ||
-                keys.some(k => k && k.length >= 2 && refText.includes(k));
-        }).slice(0, 4);
+        let hitRefs = [];
+        if (typeof researchRank === 'function') {
+            hitRefs = researchRank(refText, researchItems, 4);
+        } else {
+            hitRefs = researchItems.filter(r => {
+                const keys = Array.isArray(r.keywords) ? r.keywords : [];
+                return (r.title && refText.includes(r.title)) ||
+                    keys.some(k => k && k.length >= 2 && refText.includes(k));
+            }).slice(0, 4);
+        }
         if (hitRefs.length) {
             parts.push('【参考资料（事实性依据，写到相关情节以这里为准，不要自行编造）】\n' +
                 hitRefs.map((r, i) => `[${i + 1}] ${r.title}\n${clipText(r.content || '', 300)}`).join('\n'));
@@ -464,31 +505,40 @@ const ai = {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let fullContent = '';
+            let buffer = '';
+
+            const handleLine = (line) => {
+                line = line.trim();
+                if (!line.startsWith('data:')) return;
+                const data = line.slice(5).trim();
+                if (!data || data === '[DONE]') return;
+                try {
+                    const parsed = JSON.parse(data);
+                    const content = parsed.choices?.[0]?.delta?.content || '';
+                    if (content) {
+                        fullContent += content;
+                        onStream(content, fullContent);
+                    }
+                } catch (e) {
+                    // 单行解析失败不该影响整段流
+                }
+            };
 
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                const chunk = decoder.decode(value, { stream: true });
-                const lines = chunk.split('\n').filter(line => line.trim());
+                buffer += decoder.decode(value, { stream: true });
 
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        const data = line.slice(6);
-                        if (data === '[DONE]') continue;
-                        try {
-                            const parsed = JSON.parse(data);
-                            const content = parsed.choices?.[0]?.delta?.content || '';
-                            if (content) {
-                                fullContent += content;
-                                onStream(content, fullContent);
-                            }
-                        } catch (e) {
-                            // ignore parse errors
-                        }
-                    }
+                // 关键：按行消费，未闭合的半行留在 buffer 里等下一个数据包。
+                // 旧实现直接对每个 chunk 做 split，行被网络切开时两半都解析失败，正文整段丢失。
+                let idx;
+                while ((idx = buffer.indexOf('\n')) >= 0) {
+                    handleLine(buffer.slice(0, idx));
+                    buffer = buffer.slice(idx + 1);
                 }
             }
+            if (buffer.trim()) handleLine(buffer);
             return fullContent;
         } else {
             const data = await response.json();
@@ -804,11 +854,12 @@ const novelManager = {
         return chapters.find(ch => ch.number === chapterNum);
     },
 
-    async saveChapter(novelId, chapterNum, title, content, paragraphs = null) {
+    async saveChapter(novelId, chapterNum, title, content, paragraphs = null, opts = {}) {
         const id = `${novelId}_ch${chapterNum}`;
         const existing = await db.get('chapters', id);
-        // 覆盖前自动存档旧版本，AI 写崩或误改后可回滚
-        if (existing && existing.content && existing.content !== content) {
+        // 覆盖前自动存档旧版本，AI 写崩或误改后可回滚。
+        // 自动保存传 archive:false —— 否则每敲几下就多一份全文快照，很快把配额吃光。
+        if (existing && existing.content && existing.content !== content && opts.archive !== false) {
             await this.archiveChapterVersion(existing);
         }
         const chapter = {
@@ -1166,6 +1217,13 @@ const ui = {
 let pageHistory = [];
 
 function navigateTo(page, params = {}, isRootTab = false) {
+    // 离开编辑器前先把未落盘的内容存下来（只触发一次，随后清空引用）
+    if (__editorFlush) {
+        const f = __editorFlush;
+        __editorFlush = null;
+        try { f(); } catch (e) { /* 保存失败已在界面上提示 */ }
+    }
+
     if (!isRootTab) {
         pageHistory.push({ page: store.currentPage, params: {} });
     } else {
@@ -1675,7 +1733,7 @@ async function openSkillPicker() {
         navigateTo('skillCenter');
         return;
     }
-    const options = enabled.map(s => `<div class="skill-pick-item" onclick="pickChatSkill('${s.id}')"><span>${s.icon}</span><div style="flex:1;"><div style="font-weight:600;">${s.name}</div><div style="font-size:12px;color:var(--text-secondary);">${s.description.slice(0, 30)}...</div></div><span style="color:var(--text-secondary);">›</span></div>`).join('');
+    const options = enabled.map(s => `<div class="skill-pick-item" onclick="pickChatSkill('${s.id}')"><span>${s.icon}</span><div style="flex:1;"><div style="font-weight:600;">${escapeHtml(s.name)}</div><div style="font-size:12px;color:var(--text-secondary);">${escapeHtml((s.description||'').slice(0, 30))}...</div></div><span style="color:var(--text-secondary);">›</span></div>`).join('');
     const modal = createModal('选择技能', `
         <div style="display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow-y:auto;">
             ${options}
@@ -2000,11 +2058,11 @@ async function renderBookshelf(container) {
             <div class="novel-list">
                 ${novels.map(novel => `
                     <div class="novel-item" onclick="navigateTo('novelDetail', { novelId: '${novel.id}' })">
-                        <div class="novel-cover">${novel.title.charAt(0)}</div>
+                        <div class="novel-cover">${escapeHtml((novel.title || "?").charAt(0))}</div>
                         <div class="novel-info">
-                            <div class="novel-title">${novel.title}</div>
+                            <div class="novel-title">${escapeHtml(novel.title)}</div>
                             <div class="novel-meta">${novel.chapterCount || 0}章 · ${(novel.wordCount || 0).toLocaleString()}字 · ${formatDate(novel.updated)}</div>
-                            ${novel.genre ? `<div class="novel-genre">${novel.genre}</div>` : ''}
+                            ${novel.genre ? `<div class="novel-genre">${escapeHtml(novel.genre)}</div>` : ''}
                         </div>
                         <div class="novel-badge">当前</div>
                     </div>
@@ -2042,11 +2100,11 @@ async function renderNovelDetail(container, novelId) {
         
         container.innerHTML = `
             <div class="novel-header-card">
-                <div class="novel-header-cover">${novel.title.charAt(0)}</div>
+                <div class="novel-header-cover">${escapeHtml((novel.title || "?").charAt(0))}</div>
                 <div class="novel-header-info">
-                    <div class="novel-header-title">${novel.title}</div>
+                    <div class="novel-header-title">${escapeHtml(novel.title)}</div>
                     <div class="novel-header-meta">${novel.chapterCount || 0}章 · ${(novel.wordCount || 0).toLocaleString()}字</div>
-                    <div class="novel-header-desc">${novel.description || '暂无简介'}</div>
+                    <div class="novel-header-desc">${escapeHtml(novel.description || '暂无简介')}</div>
                 </div>
             </div>
 
@@ -2087,8 +2145,8 @@ async function renderNovelDetail(container, novelId) {
                             : outlineItems.map((item, idx) => `
                                 <div class="tree-file" onclick="event.stopPropagation(); viewOutlineItem('${novelId}', ${idx})">
                                     <span class="tree-file-icon">📄</span>
-                                    <span class="tree-file-name">第${item.chapter}章 ${item.title}</span>
-                                    <span class="tree-file-meta">${item.summary?.substring(0, 20) || ''}...</span>
+                                    <span class="tree-file-name">第${item.chapter}章 ${escapeHtml(item.title || '')}</span>
+                                    <span class="tree-file-meta">${escapeHtml((item.summary || '').substring(0, 20))}...</span>
                                 </div>
                             `).join('')}
                     </div>
@@ -2108,8 +2166,8 @@ async function renderNovelDetail(container, novelId) {
                             : characters.map((char, idx) => `
                                 <div class="tree-file" onclick="event.stopPropagation(); viewCharacter('${novelId}', ${idx})">
                                     <span class="tree-file-icon">👤</span>
-                                    <span class="tree-file-name">${char.name}</span>
-                                    <span class="tree-file-meta">${char.role || '角色'}</span>
+                                    <span class="tree-file-name">${escapeHtml(char.name || '')}</span>
+                                    <span class="tree-file-meta">${escapeHtml(char.role || '角色')}</span>
                                 </div>
                             `).join('')}
                     </div>
@@ -2129,7 +2187,7 @@ async function renderNovelDetail(container, novelId) {
                             : chapters.map(ch => `
                                 <div class="tree-file" onclick="event.stopPropagation(); navigateTo('chapterEdit', { novelId: '${novelId}', chapterNum: ${ch.number} })">
                                     <span class="tree-file-icon">📄</span>
-                                    <span class="tree-file-name">第${ch.number}章 ${ch.title}</span>
+                                    <span class="tree-file-name">第${ch.number}章 ${escapeHtml(ch.title || '')}</span>
                                     <span class="tree-file-meta">${(ch.wordCount || 0).toLocaleString()}字</span>
                                 </div>
                             `).join('')}
@@ -2161,6 +2219,7 @@ async function renderChapterEdit(container, novelId, chapterNum) {
     container.innerHTML = `
         <div class="editor-container">
             <input type="text" class="editor-title-input" id="chapter-title" value="${escapeHtml(title)}" placeholder="章节标题...">
+            <div class="editor-save-state" id="editor-save-status">已保存</div>
             <textarea class="editor-content" id="chapter-content" placeholder="在此开始写作...">${escapeHtml(content)}</textarea>
         </div>
         ${chapter && chapter.summary ? `
@@ -2197,6 +2256,73 @@ async function renderChapterEdit(container, novelId, chapterNum) {
             <button class="btn btn-outline" onclick="showResearchSheet('${novelId}')">🔎 查资料</button>
         </div>
     `;
+
+    bindEditorAutosave(novelId, chapterNum);
+}
+
+// ===== 编辑器自动保存 =====
+// 之前只有右上角一个「保存」按钮，切后台被系统回收就整章丢失。
+// 这里做：输入后 1 秒落盘、切后台立刻落盘、离开页面前强制落盘。
+// 自动保存不写版本历史（saveChapter 的 archive:false），版本只保留有意义的快照。
+let __editorFlush = null;
+
+// 全局只注册一次：切后台 / 页面卸载时，如果编辑器还挂着，立刻保存
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && __editorFlush) __editorFlush();
+});
+window.addEventListener('pagehide', () => { if (__editorFlush) __editorFlush(); });
+
+function bindEditorAutosave(novelId, chapterNum) {
+    const titleEl = document.getElementById('chapter-title');
+    const bodyEl = document.getElementById('chapter-content');
+    const statusEl = document.getElementById('editor-save-status');
+    if (!titleEl || !bodyEl) return;
+
+    let timer = null;
+    let lastSaved = `${titleEl.value}\u0000${bodyEl.value}`;
+    let saving = false;
+    let pending = false;
+
+    const setStatus = (text, cls) => {
+        if (!statusEl) return;
+        statusEl.textContent = text;
+        statusEl.className = 'editor-save-state' + (cls ? ' ' + cls : '');
+    };
+
+    const flush = async () => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        const snapshot = `${titleEl.value}\u0000${bodyEl.value}`;
+        if (snapshot === lastSaved) return;
+        if (saving) { pending = true; return; }
+
+        saving = true;
+        try {
+            await novelManager.saveChapter(
+                novelId, chapterNum,
+                titleEl.value.trim() || `第${chapterNum}章`,
+                bodyEl.value, null, { archive: false }
+            );
+            lastSaved = snapshot;
+            const t = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+            setStatus(`已自动保存 ${t}`);
+        } catch (e) {
+            // 配额满等情况必须让用户看见，否则会以为已经存上了
+            setStatus('保存失败：' + e.message, 'err');
+        } finally {
+            saving = false;
+            if (pending) { pending = false; flush(); }
+        }
+    };
+
+    const schedule = () => {
+        setStatus('未保存…', 'dirty');
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(flush, 1000);
+    };
+
+    titleEl.addEventListener('input', schedule);
+    bodyEl.addEventListener('input', schedule);
+    __editorFlush = flush;
 }
 
 // 场景卡折叠 / 保存
@@ -2402,7 +2528,7 @@ function renderWriting(container) {
             <div class="card-subtitle">选择作品开始创作</div>
             <select class="input" id="writing-novel-select" style="margin-bottom: 12px;">
                 <option value="">选择作品...</option>
-                ${store.novels.map(n => `<option value="${n.id}">${n.title}</option>`).join('')}
+                ${store.novels.map(n => `<option value="${escapeAttr(n.id)}">${escapeHtml(n.title)}</option>`).join('')}
             </select>
             <input type="number" class="input" id="writing-chapter-num" placeholder="章节号（如：1）" style="margin-bottom: 12px;">
             <textarea class="textarea" id="writing-prompt" placeholder="输入写作提示（可选）：本章剧情走向、必须出场的角色、要埋的伏笔..."></textarea>
@@ -2754,8 +2880,11 @@ function handleImportFile(input) {
                 throw new Error('不是有效的 OpenWrite 备份文件');
             }
             ui.showToast('正在恢复数据…');
-            await db.importAll(data);
-            ui.showToast('✅ 数据恢复成功');
+            const r = await db.importAll(data);
+            let msg = `已恢复 ${r.imported} 条`;
+            if (r.droppedModel) msg += '，模型配置已保留本机设置';
+            if (r.dropped) msg += `，过滤 ${r.dropped} 条异常记录`;
+            ui.showToast(msg, 3500);
             input.value = '';
             navigateTo('dataManage');
         } catch (e) {
@@ -3209,9 +3338,15 @@ async function createAndWriteChapter(novelId) {
 async function saveAndBack(novelId, chapterNum) {
     const title = document.getElementById('chapter-title').value;
     const content = document.getElementById('chapter-content').value;
-    await novelManager.saveChapter(novelId, chapterNum, title, content);
-    ui.showToast('章节已保存');
-    navigateTo('novelDetail', { novelId });
+    try {
+        await novelManager.saveChapter(novelId, chapterNum, title, content);
+        __editorFlush = null;            // 已手动保存，避免离开时再写一次
+        ui.showToast('章节已保存');
+        navigateTo('novelDetail', { novelId });
+    } catch (e) {
+        // 写库失败（配额满、被中止）必须明确告知，不能静默
+        ui.showToast('保存失败：' + e.message, 4000);
+    }
 }
 
 async function reviewThisChapter(novelId, chapterNum) {
@@ -3615,6 +3750,11 @@ function escapeHtml(str) {
         .replace(/'/g, '&#39;');
 }
 
+// 属性值转义：escapeHtml 已覆盖引号，这里再挡一下反引号，供 onclick/option 等属性用
+function escapeAttr(str) {
+    return escapeHtml(str).replace(/`/g, '&#96;');
+}
+
 // ===== 使用教程 =====
 function showTutorialModal() {
     const modal = createModal('使用教程', `
@@ -3815,7 +3955,7 @@ async function renderSkillPlazaBrowse(container) {
 
 async function renderSkillPlazaUpload(container) {
     const nickname = await skillStoreManager.getNickname();
-    const builtinOptions = BUILTIN_SKILLS.map(s => `<option value="${s.id}">${s.icon} ${s.name}</option>`).join('');
+    const builtinOptions = BUILTIN_SKILLS.map(s => `<option value="${s.id}">${s.icon} ${escapeHtml(s.name)}</option>`).join('');
 
     container.innerHTML = `
         <div class="upload-form">
@@ -4350,7 +4490,7 @@ async function viewOutlineItem(novelId, index) {
         ui.showToast('大纲条目不存在');
         return;
     }
-    const modal = createModal(`第${item.chapter}章 ${item.title}`, `
+    const modal = createModal(`第${item.chapter}章 ${escapeHtml(item.title || '')}`, `
         <div style="font-size: 14px; line-height: 1.8; color: var(--text);">
             <div style="margin-bottom: 12px; padding: 12px; background: var(--bg); border-radius: 8px;">
                 <div style="font-weight: 600; margin-bottom: 4px;">章节概要</div>
