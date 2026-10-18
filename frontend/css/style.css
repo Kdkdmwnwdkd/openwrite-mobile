@@ -363,28 +363,6 @@ html, body {
     flex-shrink: 0;
 }
 
-.composer-top {
-    margin-bottom: 8px;
-}
-
-.composer-search-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 12px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 100px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-weight: 500;
-}
-
-.composer-search-btn:active {
-    background: var(--surface);
-}
-
 .composer-input-box {
     background: var(--bg);
     border-radius: var(--radius);
@@ -4813,11 +4791,6 @@ body{ background: var(--bg); }
 .tree-folder-header .tree-label{ font-family: var(--serif); font-size: 15px; }
 
 /* 联网开关与来源标记 */
-.composer-search-btn.on {
-    background: var(--success);
-    color: #fff;
-    border-color: var(--success);
-}
 .web-src {
     font-size: 11px;
     color: var(--text-tertiary);
@@ -4960,3 +4933,18 @@ body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary
 .chat-hero-logo svg { width: 34px; height: 34px; }
 .chat-hero-title { font-size: 19px; }
 .chat-hero-subtitle { font-size: 11.5px; }
+
+/* 联网开关并入工具栏：单独一行只放一个按钮太浪费垂直空间 */
+.composer-toolbar { display: flex; align-items: center; gap: 6px; }
+.composer-net { position: relative; }
+.composer-net.on {
+    background: var(--success);
+    border-color: var(--success);
+    color: #fff;
+}
+.composer-net.on::after {
+    content: "";
+    position: absolute; top: 4px; right: 4px;
+    width: 5px; height: 5px; border-radius: 50%;
+    background: #fff; opacity: .9;
+}

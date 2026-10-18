@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.18.1',   // 与 package.json 保持一致
+    VERSION: '2.18.2',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1638,15 +1638,13 @@ async function renderChat(container) {
 
         <!-- 整合式底部输入区 -->
         <div class="chat-composer">
-            <div class="composer-top">
-                <button class="composer-search-btn" id="chat-websearch-btn" onclick="showWebSearch()">联网</button>
-            </div>
             <div class="composer-input-box">
                 <textarea class="composer-textarea" id="chat-input" rows="1"
                           oninput="autoGrowInput(this)"
                           placeholder="和 AI 聊剧情、补设定，让它把正文写出来…"></textarea>
             </div>
             <div class="composer-toolbar">
+                <button class="composer-btn composer-net" id="chat-websearch-btn" onclick="showWebSearch()">联网</button>
                 <button class="composer-btn" onclick="openSkillPicker()">@ 技能</button>
                 <button class="composer-btn" onclick="attachFile()"># 文件</button>
                 <button class="composer-btn" onclick="showModelIndicator()">${ICON_GEAR} 默认</button>
@@ -2401,7 +2399,6 @@ function renderWebSearchBtn() {
     if (!b) return;
     b.classList.toggle('on', !!store.webSearchOn);
     b.textContent = store.webSearchOn ? '联网中' : '联网';
-    b.classList.toggle('on', !!store.webSearchOn);
 }
 
 // 把检索结果压成一段可注入的事实依据。压缩到 500 字/条：
