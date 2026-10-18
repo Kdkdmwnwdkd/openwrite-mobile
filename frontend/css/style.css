@@ -4522,3 +4522,289 @@ html, body {
 .hook-row-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hook-row-sub { font-size: 11.5px; color: #999; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hook-row-arrow { color: #ccc; }
+
+/* ============================================================
+   v2.14 视觉重构：纸与墨，一处朱砂
+   只覆盖视觉层，不动布局与信息结构
+   ============================================================ */
+:root{
+    --primary:#A63A2B;
+    --primary-light:#C05648;
+    --primary-dark:#8C2F23;
+    --primary-soft:rgba(166,58,43,.07);
+
+    --bg:#F4F1EA;
+    --surface:#FBFAF6;
+    --surface-2:#EFEBE2;
+
+    --text:#191714;
+    --text-secondary:#4A453D;
+    --text-tertiary:#7A7366;
+
+    --border:#E5DFD2;
+    --border-strong:#D4CCBB;
+
+    --success:#3D6553;
+    --warning:#94701F;
+    --danger:#A63A2B;
+
+    --shadow:0 1px 2px rgba(25,23,20,.04);
+    --shadow-sm:0 1px 2px rgba(25,23,20,.03);
+
+    --radius:14px;
+    --radius-lg:18px;
+    --radius-sm:10px;
+
+    --ink:#191714;
+    --paper:#F4F1EA;
+    --serif:"Songti SC","Source Han Serif SC","Noto Serif CJK SC",Georgia,serif;
+}
+
+body{ background: var(--bg); }
+
+/* --- 标题：宋体，字距收紧 --- */
+.header-title,
+.novel-header-title,
+.modal-title,
+.empty-title,
+.draft-title{
+    font-family: var(--serif);
+    font-weight: 600;
+    letter-spacing: -0.015em;
+}
+.header-title{ font-size: 22px; }
+
+/* --- 按钮：主操作改墨黑，描边改发丝 --- */
+.btn{ border-radius: 11px; }
+.btn-primary{
+    background: var(--ink);
+    color: var(--paper);
+    border-color: var(--ink);
+}
+.btn-primary:active{ background:#000; }
+.btn-outline{
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+.btn-outline:active{ background: var(--surface-2); }
+.btn-secondary{
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+}
+.btn-danger{ background: var(--primary); color:#fff; }
+
+/* --- 卡片：去掉重阴影，用底色 + 发丝线分层 --- */
+.novel-item,
+.settings-item,
+.param-block,
+.stats-dashboard,
+.audit-card{
+    box-shadow: none;
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+.novel-item{ border-radius:16px; padding:14px; }
+.settings-item{ border-radius:14px; padding:14px 16px; margin-bottom:6px; }
+.app-header{ background: var(--bg); border-bottom:1px solid var(--border); }
+.bottom-nav{ background: color-mix(in srgb, var(--bg) 92%, transparent); border-top:1px solid var(--border); }
+.nav-item{ font-size:10.5px; }
+.nav-item.active{ color: var(--ink); }
+.nav-item.active svg{ stroke-width: 2; }
+
+/* --- 书封：去掉渐变，做成纸脊 --- */
+.novel-cover,
+.novel-header-cover{
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--serif);
+    font-weight: 600;
+    box-shadow: none;
+}
+.novel-cover{ width:52px; height:68px; border-radius:5px; font-size:22px; }
+.novel-header-cover{ border-radius:6px; }
+
+/* --- 统计：压成一行，不再占一张卡 --- */
+.stats-dashboard{
+    background: none; border:0; box-shadow:none;
+    padding:0; margin:0 0 18px;
+}
+.stats-dashboard-title{ display:none; }
+.stats-grid-3{ display:flex; gap:18px; }
+.stat-card{ background:none; border:0; padding:0; text-align:left; }
+.stat-card-icon{ display:none; }
+.stat-card-value{ font-size:15px; font-weight:600; letter-spacing:-.01em; }
+.stat-card-label{ font-size:10.5px; color: var(--text-tertiary); margin-top:1px; }
+
+/* --- 编辑器：正文放大，标题宋体 --- */
+.editor-title-input{
+    font-family: var(--serif);
+    font-size: 22px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+}
+.editor-content{
+    font-size: 17.5px;
+    line-height: 2.0;
+    letter-spacing: .01em;
+    color: var(--text);
+}
+/* 工具按钮不再堆三行，改成一条可横滑的条 */
+.action-buttons-row{
+    display:flex;
+    flex-wrap:nowrap;
+    gap:8px;
+    overflow-x:auto;
+    padding:2px 0 6px;
+    scrollbar-width:none;
+}
+.action-buttons-row::-webkit-scrollbar{ display:none; }
+.action-buttons-row .btn{
+    flex:0 0 auto;
+    height:38px;
+    padding:0 14px;
+    font-size:13.5px;
+    border-radius:10px;
+}
+
+/* --- 列表行：发丝线，取消圆角卡片堆叠感 --- */
+.tree-file{ border-radius:10px; }
+.tree-file-name{ font-size:14.5px; }
+.tree-folder-header{ padding:12px 14px; }
+
+/* --- 设置 --- */
+.settings-label{ font-size:14.5px; letter-spacing:-.005em; }
+.settings-value{ font-size:11.5px; color:var(--text-tertiary); }
+.settings-icon{ opacity:.75; }
+
+/* --- 详情页头图 --- */
+.novel-header-card{
+    background: var(--surface);
+    border:1px solid var(--border);
+    box-shadow:none;
+}
+
+/* --- 输入控件 --- */
+.input, .form-select, textarea.input{
+    background: var(--surface);
+    border:1px solid var(--border);
+    color: var(--text);
+}
+.input:focus, .form-select:focus{ border-color: var(--border-strong); }
+
+/* --- 弹层 --- */
+.modal-content{ background: var(--surface); }
+.toast{ background: var(--ink); color: var(--paper); }
+
+/* --- 「继续写作」卡（书架顶部） --- */
+.resume-card{
+    display:flex; align-items:center; gap:13px;
+    padding:13px 14px; margin-bottom:16px;
+    background: var(--surface);
+    border:1px solid var(--border);
+    border-radius:16px;
+    cursor:pointer;
+}
+.resume-card:active{ background: var(--surface-2); }
+.resume-cover{
+    width:46px; height:58px; flex:none; border-radius:5px;
+    background: var(--surface-2); border:1px solid var(--border);
+    display:flex; align-items:center; justify-content:center;
+    font-family: var(--serif); font-size:21px; color: var(--text);
+}
+.resume-main{ flex:1; min-width:0; }
+.resume-k{
+    font-family: var(--mono, ui-monospace, monospace);
+    font-size:10px; letter-spacing:.14em;
+    color: var(--primary); font-weight:600; margin-bottom:3px;
+}
+.resume-t{
+    font-size:15px; font-weight:600; letter-spacing:-.005em;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.resume-m{
+    font-size:11.5px; color:var(--text-tertiary); margin-top:2px;
+    font-variant-numeric: tabular-nums;
+}
+.resume-go{
+    width:38px; height:38px; flex:none; border-radius:50%;
+    border:1px solid var(--border-strong); background:transparent;
+    color: var(--text-secondary);
+    display:flex; align-items:center; justify-content:center;
+}
+
+/* --- 页面左右留白（原来内容贴边） --- */
+#page-bookshelf, #page-novelDetail, #page-settings{ padding: 0 16px; }
+#page-chapterEdit{ padding: 0 16px; }
+#page-chapterEdit .editor-container{ padding: 12px 10px; background: var(--surface); border-radius: 14px; }
+
+/* --- 顶部按钮：之前完全没样式，显示成系统默认方框 --- */
+.header-btn{
+    height: 32px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 13.5px;
+}
+.header-btn:active{ background: var(--surface-2); }
+
+/* --- 设置图标：去掉彩色底块，统一墨色描边 --- */
+.settings-icon{
+    background: none !important;
+    color: var(--text-secondary);
+    border-radius: 0;
+}
+.settings-icon svg{
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.6;
+    width: 20px;
+    height: 20px;
+}
+
+/* --- 书架：统计行压平、去掉「当前」徽章、题材标签改描边 --- */
+.stats-grid-3{ display:flex; align-items:baseline; gap:20px; }
+.stat-card{ display:flex; align-items:baseline; gap:5px; white-space:nowrap; }
+.stat-card-value{ margin:0; }
+.novel-badge{ display: none; }
+.novel-genre{
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-tertiary);
+    border-radius: 999px;
+    padding: 1px 8px;
+    font-size: 10.5px;
+}
+
+/* --- 详情页：次要操作收成一条横向滑动 --- */
+.nd-actions .btn{
+    height: 34px;
+    padding: 0 12px;
+    font-size: 12.5px;
+    border-radius: 9px;
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+    border-color: var(--border);
+}
+.tree-folder{
+    background: none;
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
+}
+.tree-folder + .tree-folder{ margin-top: 0; }
+.tree-folder-header{ padding: 14px 4px; }
+.tree-folder-content{ padding-left: 0; }
+
+/* --- 收尾：去掉彩色数字与列表里的 emoji，减少视觉噪音 --- */
+.stat-card-value{ color: var(--text); }
+.tree-icon, .tree-file-icon{ display: none; }
+.editor-container{ min-height: calc(100vh - 340px); }
+.tree-folder-header .tree-label{ font-family: var(--serif); font-size: 15px; }

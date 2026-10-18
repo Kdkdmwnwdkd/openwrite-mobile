@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.13.0',   // 与 package.json 保持一致
+    VERSION: '2.14.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1540,6 +1540,7 @@ function navigateTo(page, params = {}, isRootTab = false) {
     };
 
     if (renderers[page]) renderers[page](view);
+    stripButtonEmoji(view);
     window.scrollTo(0, 0);
 }
 
@@ -2275,7 +2276,33 @@ async function renderBookshelf(container) {
             return;
         }
 
+        // 写作 App 的第一动作是「接着上次写」，所以把最近一章放到最上面
+        let resumeHtml = '';
+        const recent = novels.slice().sort((a, b) => (b.updated || 0) - (a.updated || 0))[0];
+        if (recent) {
+            try {
+                const chs = await novelManager.listChapters(recent.id);
+                const last = chs.slice().sort((a, b) => b.number - a.number)[0];
+                if (last) {
+                    const chTitle = (last.title || '').replace(/^第\d+章\s*/, '') || '未命名';
+                    resumeHtml = `
+                        <div class="resume-card" onclick="navigateTo('chapterEdit', { novelId: '${recent.id}', chapterNum: ${last.number} })">
+                            <div class="resume-cover">${escapeHtml((recent.title || '书').charAt(0))}</div>
+                            <div class="resume-main">
+                                <div class="resume-k">继续写作</div>
+                                <div class="resume-t">第 ${last.number} 章 · ${escapeHtml(chTitle)}</div>
+                                <div class="resume-m">${formatDate(last.updated || recent.updated)} · ${(last.wordCount || 0).toLocaleString()} 字</div>
+                            </div>
+                            <div class="resume-go">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8.5 5.2l11 6.8-11 6.8z"/></svg>
+                            </div>
+                        </div>`;
+                }
+            } catch (e) { /* 章节读不出来就不显示，不影响书架 */ }
+        }
+
         container.innerHTML = `
+            ${resumeHtml}
             <div class="stats-dashboard">
                 <div class="stats-dashboard-title">📊 数据统计</div>
                 <div class="stats-grid-3">
@@ -2355,21 +2382,17 @@ async function renderNovelDetail(container, novelId) {
                 <button class="btn btn-secondary" onclick="showWriteChapterModal('${novelId}')">✍️ 带提示写章节</button>
             </div>
 
-            <div class="action-buttons-row" style="margin-bottom: 12px;">
-                <button class="btn btn-outline" onclick="navigateTo('outlineEditor', { novelId: '${novelId}' })">📋 编辑大纲</button>
-                <button class="btn btn-outline" onclick="navigateTo('plotSimulate', { novelId: '${novelId}' })">🔮 情节推演</button>
-                <button class="btn btn-outline" onclick="navigateTo('characterCards', { novelId: '${novelId}' })">👥 角色卡</button>
-            </div>
-            <div class="action-buttons-row" style="margin-bottom: 12px;">
+            <div class="action-buttons-row nd-actions" style="margin-bottom: 14px;">
+                <button class="btn btn-outline" onclick="navigateTo('outlineEditor', { novelId: '${novelId}' })">📋 大纲</button>
+                <button class="btn btn-outline" onclick="navigateTo('plotSimulate', { novelId: '${novelId}' })">🔮 推演</button>
+                <button class="btn btn-outline" onclick="navigateTo('characterCards', { novelId: '${novelId}' })">👥 角色</button>
                 <button class="btn btn-outline" onclick="navigateTo('worldview', { novelId: '${novelId}' })">🌍 世界观</button>
+                <button class="btn btn-outline" onclick="navigateTo('foreshadowing', { novelId: '${novelId}' })">🧵 伏笔</button>
+                <button class="btn btn-outline" onclick="showReaderAuditModal('${novelId}')">📈 体检</button>
+                <button class="btn btn-outline" onclick="scanChapterHooks('${novelId}')">🪝 钩子</button>
                 <button class="btn btn-outline" onclick="navigateTo('agentStudio', { novelId: '${novelId}' })">🎭 多Agent</button>
                 <button class="btn btn-outline" onclick="navigateTo('consistencyCheck', { novelId: '${novelId}' })">🔍 一致性</button>
                 <button class="btn btn-outline" onclick="navigateTo('novelExport', { novelId: '${novelId}' })">📤 导出</button>
-            </div>
-            <div class="action-buttons-row" style="margin-bottom: 12px;">
-                <button class="btn btn-outline" onclick="showReaderAuditModal('${novelId}')">📈 读者体检</button>
-                <button class="btn btn-outline" onclick="scanChapterHooks('${novelId}')">🪝 钩子扫描</button>
-                <button class="btn btn-outline" onclick="navigateTo('foreshadowing', { novelId: '${novelId}' })">🧵 伏笔追踪</button>
             </div>
 
             <!-- 目录树形结构 -->
@@ -4454,6 +4477,35 @@ function showTutorialModal() {
         </div>`);
     modal.show();
 }
+
+// 操作按钮上的 emoji 在真机是彩色图标，和纸墨界面打架；统一剥掉，只留文字。
+// 注意：渲染函数是 async 的，navigateTo 里同步调用会拿到空容器，
+// 所以用 MutationObserver 盯着 DOM，按钮一出现就处理。
+const __EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}]/gu;
+
+function stripOneButton(btn) {
+    if (!btn || btn.children.length) return;          // 含图标的按钮不动
+    const before = btn.textContent;
+    const after = before.replace(__EMOJI_RE, '').replace(/\s+/g, ' ').trim();
+    if (after && after !== before.trim()) btn.textContent = after;
+}
+
+function stripButtonEmoji(root) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll('.action-buttons-row .btn').forEach(stripOneButton);
+    if (root.matches && root.matches('.action-buttons-row .btn')) stripOneButton(root);
+}
+
+const __emojiObserver = new MutationObserver(muts => {
+    for (const m of muts) {
+        m.addedNodes && m.addedNodes.forEach(node => {
+            if (node.nodeType === 1) stripButtonEmoji(node);
+        });
+    }
+});
+document.addEventListener('DOMContentLoaded', () => {
+    __emojiObserver.observe(document.body, { childList: true, subtree: true });
+});
 
 // ===== 返回 / 原生壳 =====
 const ROOT_PAGES = ['chat', 'bookshelf', 'settings'];
