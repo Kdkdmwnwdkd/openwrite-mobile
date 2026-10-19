@@ -36,7 +36,7 @@ const RESEARCH_PROVIDERS = {
     },
     serper: {
         label: 'Serper（Google）',
-        hint: 'Google 结果，国内可直连，按次计费',
+        hint: 'Google 结果，国内可直连，注册送 2500 次',
         endpoint: 'https://google.serper.dev/search',
         headers: (key) => ({ 'X-API-KEY': key, 'Content-Type': 'application/json' }),
         body: (q, count) => ({ q, num: count }),
@@ -50,7 +50,7 @@ const RESEARCH_PROVIDERS = {
     },
     tavily: {
         label: 'Tavily',
-        hint: 'Agent 生态广；浏览器直连的跨域支持不稳定，建议配代理',
+        hint: '每月 1000 次免费；浏览器直连的跨域支持不稳定，建议配代理',
         endpoint: 'https://api.tavily.com/search',
         headers: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }),
         // include_raw_content 让 Tavily 直接回正文，就不必再抓一次
@@ -663,7 +663,7 @@ async function openResearchConfig() {
             <label class="rs-radio"><input type="radio" name="rs-mode" value="off" ${cfg.mode === 'off' ? 'checked' : ''}>
                 <span><b>关闭</b><em>不联网，纯本机写作</em></span></label>
             <label class="rs-radio"><input type="radio" name="rs-mode" value="builtin" ${cfg.mode === 'builtin' ? 'checked' : ''}>
-                <span><b>模型内置联网</b><em>用当前模型自带搜索，不用另配 Key（支持通义 / 智谱）</em></span></label>
+                <span><b>模型内置联网</b><em>用当前模型自带搜索，不用另配 Key（通义 / 智谱 / DeepSeek-v4-flash）</em></span></label>
             <label class="rs-radio"><input type="radio" name="rs-mode" value="api" ${cfg.mode === 'api' ? 'checked' : ''}>
                 <span><b>搜索 API</b><em>结果带来源链接，可沉淀成资料，推荐</em></span></label>
 
@@ -694,7 +694,9 @@ async function openResearchConfig() {
             </div>
 
             <div class="rs-cfg-tip" id="rs-builtin-tip" style="margin-top:12px;display:none">
-                内置联网由模型服务端执行搜索，你只能拿到答案、拿不到来源列表，也无法沉淀成资料。
+                内置联网由模型服务端执行搜索，你只能拿到答案、拿不到来源列表，也无法沉淀成资料。<br>
+                <b>DeepSeek 按次计费</b>：5 元 / 1000 次（约 ¥0.005/次），2026-11-01 起收费，之前免费；无结果或失败不计费。
+                通义 / 智谱的搜索含在模型 token 费用里。<b>想完全免费</b>：用下面的搜索 API，Tavily 每月 1000 次、Serper 送 2500 次。
             </div>
         </div>
         <div class="rs-cfg-actions">

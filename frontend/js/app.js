@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.18.3',   // 与 package.json 保持一致
+    VERSION: '2.18.4',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1872,7 +1872,12 @@ async function sendMessage() {
         messagesBox.scrollTop = messagesBox.scrollHeight;
         try {
             webHits = await researchSearch(text);
-            if (webHits.length) systemPrompt += buildWebContext(webHits);
+            if (webHits.length) {
+                systemPrompt += buildWebContext(webHits);
+                // 只统计成功返回内容的检索（DeepSeek 只对成功请求计费）
+                store.searchCount = (store.searchCount || 0) + 1;
+                renderWebSearchBtn();
+            }
         } catch (e) {
             ui.showToast('联网检索失败，本条按普通对话回答：' + e.message, 4500);
         }
@@ -2374,35 +2379,98 @@ function attachFile() {
 function rollDice() { ui.showToast(`🎲 ${Math.floor(Math.random() * 6) + 1}`); }
 // 联网开关：原来按钮指向 showWebSearch()，而这个函数根本没定义，点了直接 ReferenceError；
 // 旁边的 webSearch() 只弹一句"开发中"。等于完全没实现。
+// 花钱的路径（DeepSeek 内置搜索按次计费）必须先讲清楚，不能让人点一下就开始花。
 async function showWebSearch() {
-    const turningOn = !store.webSearchOn;
-
-    if (turningOn) {
-        // 模型自己能联网就直接开，不拿配置页挡人。
-        // 只有既没内置能力、也没填搜索 Key 时，才需要用户做选择。
-        const picked = await resolveSearchMode();
-        if (picked.mode === 'off') {
-            // 说清楚「为什么不能联网 + 怎么修」，别让人猜
-            let mc = null;
-            try { mc = await settings.getModelConfig(); } catch (e) { /* 忽略 */ }
-            const d = describeBuiltinSearch(mc || {});
-            ui.showToast(`${d.reason}：${d.fix}`, 6000);
-            openResearchConfig();
-            return;
-        }
+    if (store.webSearchOn) {
+        store.webSearchOn = false;
+        try { localStorage.setItem('ow_web_search', '0'); } catch (e) { /* 忽略 */ }
+        renderWebSearchBtn();
+        ui.showToast('已关闭联网');
+        return;
     }
 
-    store.webSearchOn = turningOn;
-    try { localStorage.setItem('ow_web_search', turningOn ? '1' : '0'); } catch (e) { /* 忽略 */ }
+    // 模型自己能联网就直接开，不拿配置页挡人。
+    // 只有既没内置能力、也没填搜索 Key 时，才需要用户做选择。
+    const picked = await resolveSearchMode();
+    if (picked.mode === 'off') {
+        // 说清楚「为什么不能联网 + 怎么修」，别让人猜
+        let mc = null;
+        try { mc = await settings.getModelConfig(); } catch (e) { /* 忽略 */ }
+        const d = describeBuiltinSearch(mc || {});
+        ui.showToast(`${d.reason}：${d.fix}`, 6000);
+        openResearchConfig();
+        return;
+    }
+
+    if (picked.mode === 'builtin') {
+        let mc = null;
+        try { mc = await settings.getModelConfig(); } catch (e) { /* 忽略 */ }
+        const isDeepseek = /deepseek/i.test((mc && mc.model) || '') ||
+                           /deepseek/i.test((mc && mc.baseUrl) || '');
+        // DeepSeek 服务端搜索按成功请求计费，首次开启要明确告知
+        if (isDeepseek && localStorage.getItem('ow_search_cost_ack') !== '1') {
+            showSearchCostConfirm();
+            return;
+        }
+        enableWebSearch(true);
+        return;
+    }
+
+    enableWebSearch(false);
+}
+
+function enableWebSearch(isPaid) {
+    store.webSearchOn = true;
+    store.searchCount = 0;
+    try { localStorage.setItem('ow_web_search', '1'); } catch (e) { /* 忽略 */ }
     renderWebSearchBtn();
-    ui.showToast(turningOn ? '已联网：发消息前会先检索资料' : '已关闭联网');
+    ui.showToast(isPaid
+        ? '已联网：DeepSeek 搜索约 ¥0.005/次（11/1 起计费）'
+        : '已联网：发消息前会先检索资料', 4000);
+}
+
+// 首次开启 DeepSeek 内置搜索的确认框：把价格、计费起点、省钱办法一次讲完
+function showSearchCostConfirm() {
+    const body = `
+        <div class="rs-cfg">
+            <p style="margin:0 0 10px">DeepSeek 的联网搜索由服务端执行，<b>按成功请求计费</b>：</p>
+            <ul style="margin:0 0 12px;padding-left:18px;line-height:1.9">
+                <li>官方价格 <b>5 元 / 1000 次</b>，约 <b>¥0.005 一次</b></li>
+                <li><b>2026 年 11 月 1 日 00:00 起</b>正式收费，之前免费</li>
+                <li>搜索无结果、请求失败或超时 <b>不计费</b></li>
+            </ul>
+            <p style="margin:0 0 12px">开启后，每发一条消息会检索一次；按钮上会显示本次已检索次数。</p>
+            <p style="margin:0 0 6px"><b>想完全免费</b>：改用搜索 API —— Tavily 每月 1000 次免费、Serper 注册送 2500 次、博查有免费额度，结果还能沉淀成资料。</p>
+            <label class="rs-check-line" style="margin-top:12px">
+                <input type="checkbox" id="rs-cost-ack">
+                <span>以后不再提示</span>
+            </label>
+        </div>
+        <div class="rs-cfg-actions">
+            <button class="btn btn-outline" onclick="closeModal()">取消</button>
+            <button class="btn btn-primary" onclick="acceptSearchCost()">继续联网</button>
+        </div>`;
+    createModal('联网会产生费用', body).show();
+}
+
+function acceptSearchCost() {
+    const ack = document.getElementById('rs-cost-ack');
+    if (ack && ack.checked) {
+        try { localStorage.setItem('ow_search_cost_ack', '1'); } catch (e) { /* 忽略 */ }
+    }
+    closeModal();
+    enableWebSearch(true);
 }
 
 function renderWebSearchBtn() {
     const b = document.getElementById('chat-websearch-btn');
     if (!b) return;
-    b.classList.toggle('on', !!store.webSearchOn);
-    b.textContent = store.webSearchOn ? '联网中' : '联网';
+    const on = !!store.webSearchOn;
+    const n = store.searchCount || 0;
+    b.classList.toggle('on', on);
+    // 手机上没有 hover，次数直接写在按钮上，花了多少次一眼能看到
+    b.textContent = on ? (n > 0 ? `联网中 ${n}` : '联网中') : '联网';
+    b.title = on ? `已联网 · 本次开启后已检索 ${n} 次` : '开启后每条消息先联网检索资料';
 }
 
 // 把检索结果压成一段可注入的事实依据。压缩到 500 字/条：
@@ -4882,6 +4950,7 @@ const store = {
     currentPage: 'chat',
     currentParams: {},          // 当前页面参数，供返回时还原
     webSearchOn: false,         // 聊天页联网开关（持久化在 localStorage）
+    searchCount: 0,             // 本次开启联网后已检索次数（不持久化）
     currentSessionId: 'main',   // 对话会话 id（老数据都在 main 下）
     currentNovel: null,
     currentChapter: null,
@@ -5032,7 +5101,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 恢复上次的联网开关
     try {
-        store.webSearchOn = localStorage.getItem('ow_web_search') === '1';
+        const wasOn = localStorage.getItem('ow_web_search') === '1';
+        let allowRestore = wasOn;
+        if (wasOn && localStorage.getItem('ow_search_cost_ack') !== '1') {
+            // 升级上来的用户：DeepSeek 内置搜索可能已开始计费，先不自动联网
+            const mc = await settings.getModelConfig().catch(() => null);
+            const rc = await getResearchConfig().catch(() => null);
+            const usingApi = rc && rc.mode === 'api' && rc.apiKey;
+            const isDsBuiltin = !usingApi && mc &&
+                (/deepseek/i.test(mc.model || '') || /deepseek/i.test(mc.baseUrl || ''));
+            if (isDsBuiltin) {
+                allowRestore = false;
+                try { localStorage.setItem('ow_web_search', '0'); } catch (e) { /* 忽略 */ }
+                ui.showToast('联网已暂停：DeepSeek 搜索按次计费，重新开启时会说明价格', 5000);
+            }
+        }
+        store.webSearchOn = allowRestore;
         renderWebSearchBtn();
     } catch (e) { /* 忽略 */ }
 
