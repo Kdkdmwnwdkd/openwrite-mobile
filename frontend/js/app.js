@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.18.4',   // 与 package.json 保持一致
+    VERSION: '2.18.5',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1866,8 +1866,12 @@ async function sendMessage() {
 
     // 联网：先检索，再把这批资料作为「事实依据」塞进系统提示。
     // 检索失败不阻断对话——用户要的是回答，不是一句报错。
+    // 续写类短指令（继续 / 好的 / 嗯）拿去搜网只会搜回噪音，还白花一次搜索钱，直接跳过。
+    const isContinuation = /^(继续(写|吧)?|接着(写|来)?|好(的|吧)?|嗯|可以|谢谢|再来(一段|一章)?|下一段|下一章|往下写|就这样)[吧呢啊呀。！!，,～~…\s]*$/.test(text.trim());
     let webHits = [];
-    if (store.webSearchOn) {
+    if (store.webSearchOn && isContinuation) {
+        ui.showToast('续写指令：跳过联网检索（省一次搜索）', 2500);
+    } else if (store.webSearchOn) {
         aiLoading.innerHTML = `<div class="msg-bubble ai loading">正在联网检索…</div>`;
         messagesBox.scrollTop = messagesBox.scrollHeight;
         try {
@@ -2439,7 +2443,7 @@ function showSearchCostConfirm() {
                 <li><b>2026 年 11 月 1 日 00:00 起</b>正式收费，之前免费</li>
                 <li>搜索无结果、请求失败或超时 <b>不计费</b></li>
             </ul>
-            <p style="margin:0 0 12px">开启后，每发一条消息会检索一次；按钮上会显示本次已检索次数。</p>
+            <p style="margin:0 0 12px">开启后，每发一条消息会检索一次（「继续」这类续写指令除外，不花这次钱）；按钮上会显示本次已检索次数。</p>
             <p style="margin:0 0 6px"><b>想完全免费</b>：改用搜索 API —— Tavily 每月 1000 次免费、Serper 注册送 2500 次、博查有免费额度，结果还能沉淀成资料。</p>
             <label class="rs-check-line" style="margin-top:12px">
                 <input type="checkbox" id="rs-cost-ack">

@@ -1,6 +1,6 @@
 {
     "name": "openwrite-mobile",
-    "version": "2.18.4",
+    "version": "2.18.5",
     "description": "OpenWrite AI Novel Writing Assistant - Mobile Edition",
     "main": "index.js",
     "scripts": {
