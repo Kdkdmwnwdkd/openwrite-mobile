@@ -71,11 +71,18 @@ function hostOf(url) {
 }
 
 // ===== 配置 =====
-const RESEARCH_DEFAULT = { mode: 'off', provider: 'bocha', apiKey: '', reader: '', autoFetch: false, count: 6 };
+const RESEARCH_DEFAULT = {
+    mode: 'off', provider: 'bocha', apiKey: '', reader: '', autoFetch: false, count: 6,
+    // 备用搜索：主搜索超时/报错/没结果时按顺序自动切换。
+    // 单一搜索服务就是单点故障，DeepSeek 挂过不止一次，必须能换条路走。
+    backups: []
+};
 
 async function getResearchConfig() {
     const saved = await settings.get('researchConfig', null);
-    return Object.assign({}, RESEARCH_DEFAULT, saved || {});
+    const cfg = Object.assign({}, RESEARCH_DEFAULT, saved || {});
+    if (!Array.isArray(cfg.backups)) cfg.backups = [];   // 兼容老数据
+    return cfg;
 }
 
 async function setResearchConfig(cfg) {
@@ -131,14 +138,82 @@ function describeBuiltinSearch(config) {
 }
 
 // 决定这次搜索走哪条路：
-// 模型自带联网 > 用户填的搜索 API > 没得用
-// 这样只要模型支持，"点一下就能搜"，不必先去配置页选模式
+// 用户明确选了 API 就用 API 为主；否则模型自带联网优先；都没有才看备用 Key。
+// 具体执行顺序由 buildSearchChain 排，失败会自动往后换。
 async function resolveSearchMode() {
     const cfg = await getResearchConfig();
+    const hasBackupKey = (cfg.backups || []).some(b => b && b.apiKey);
     if (cfg.mode === 'api' && cfg.apiKey) return { mode: 'api', cfg };
     if (await currentModelSupportsBuiltin()) return { mode: 'builtin', cfg };
-    if (cfg.mode === 'api') return { mode: 'api', cfg };   // 选了 API 但没填 key，让它抛错更明确
+    // 主搜索没填、但备用里有可用 Key：也算能搜，链路里自然跳过空的主搜索
+    if (cfg.mode === 'api' || cfg.apiKey || hasBackupKey) return { mode: 'api', cfg };
     return { mode: 'off', cfg };
+}
+
+// 把「这次能用哪些搜索」排成一条链，失败一个换下一个。
+// 单一服务就是单点故障：DeepSeek 抽风、博查欠费、Tavily 跨域失败，
+// 都不能让"联网"这个功能整体瘫掉。
+async function buildSearchChain(mode, cfg) {
+    const chain = [];
+    const seen = new Set();
+
+    const addApi = (provider, apiKey, tag) => {
+        if (!provider || !apiKey) return;
+        const dedupe = provider + '|' + apiKey;
+        if (seen.has(dedupe)) return;
+        seen.add(dedupe);
+        const p = RESEARCH_PROVIDERS[provider];
+        chain.push({
+            kind: 'api', provider, apiKey, tag,
+            count: cfg.count || 6,
+            label: (p && p.label) || provider
+        });
+    };
+
+    const builtinOk = await currentModelSupportsBuiltin();
+    const builtin = builtinOk ? [{ kind: 'builtin', label: '模型内置联网', tag: '内置' }] : [];
+
+    if (mode === 'builtin') {
+        chain.push(...builtin);
+        addApi(cfg.provider, cfg.apiKey, '主');
+    } else if (mode === 'api') {
+        addApi(cfg.provider, cfg.apiKey, '主');
+    }
+    (cfg.backups || []).forEach((b, i) => addApi(b.provider, b.apiKey, '备用' + (i + 1)));
+
+    // API 全排在前面时，内置联网留作最后的底
+    if (mode === 'api' && builtinOk) chain.push(...builtin);
+    return chain;
+}
+
+async function researchSearch(query) {
+    const { mode, cfg } = await resolveSearchMode();
+    const chain = await buildSearchChain(mode, cfg);
+    if (!chain.length) throw new Error('当前模型没有联网能力，需要配一个搜索 API 或备用搜索');
+
+    const errors = [];
+    for (let i = 0; i < chain.length; i++) {
+        const step = chain[i];
+        try {
+            const hits = step.kind === 'builtin'
+                ? await researchSearchBuiltin(query)
+                : await researchSearchApi(query, step);
+            if (hits && hits.length) {
+                if (i > 0) {
+                    // 用了后面的路：告诉用户主搜索挂了，但写作没被打断
+                    ui.showToast(`主搜索不可用，已自动切到「${step.label}」`, 3200);
+                }
+                return hits;
+            }
+            errors.push(`${step.label}：没有结果`);
+        } catch (e) {
+            errors.push(`${step.label}：${e.message}`);
+            if (i + 1 < chain.length) {
+                ui.showToast(`「${step.label}」不可用，正在换下一个…`, 2000);
+            }
+        }
+    }
+    throw new Error('所有检索方式都失败了（' + errors.join('；') + '）');
 }
 
 // DeepSeek 的联网搜索：一次请求内完成 search → open_page → 回答。
@@ -157,7 +232,7 @@ async function deepseekWebSearch(query) {
     let base = String(mc.baseUrl || 'https://api.deepseek.com').replace(/\/+$/, '');
     if (base.endsWith('/v1')) base = base.slice(0, -3);
 
-    const res = await fetch(`${base}/responses`, {
+    const res = await fetchWithTimeout(`${base}/responses`, {
         method: 'POST',
         headers: {
             'Authorization': `Bearer ${mc.apiKey}`,
@@ -208,12 +283,30 @@ async function deepseekWebSearch(query) {
 }
 
 // ===== 搜索 =====
+// 单次检索超时：一家服务挂死时不能拖住整条链，到点就换下一家
+const SEARCH_TIMEOUT = 10000;
+
+async function fetchWithTimeout(url, opts, ms = SEARCH_TIMEOUT) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    try {
+        return await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
+    } catch (e) {
+        if (e && e.name === 'AbortError') {
+            throw new Error(`请求超时（${Math.round(ms / 1000)} 秒）`);
+        }
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function researchSearchApi(query, cfg) {
     const p = RESEARCH_PROVIDERS[cfg.provider];
     if (!p) throw new Error('未知的搜索服务');
     if (!cfg.apiKey) throw new Error('还没填搜索服务的 API Key');
 
-    const res = await fetch(p.endpoint, {
+    const res = await fetchWithTimeout(p.endpoint, {
         method: 'POST',
         headers: p.headers(cfg.apiKey),
         body: JSON.stringify(p.body(query, cfg.count || 6))
@@ -235,10 +328,23 @@ async function researchSearchBuiltin(query) {
         throw new Error('当前模型没有内置联网能力，请到「查资料 → 配置」改用搜索 API 模式');
     }
     if (payload.__responses) return await deepseekWebSearch(query);
-    const text = await ai.chat([
-        { role: 'system', content: '你是资料检索助手。请联网核实后回答，只给事实与关键数据，注明出处名称与年份，不要编造。控制在 400 字内。' },
-        { role: 'user', content: query }
-    ], null, 1200, null, { searchPayload: payload });
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), SEARCH_TIMEOUT);
+    let text;
+    try {
+        text = await ai.chat([
+            { role: 'system', content: '你是资料检索助手。请联网核实后回答，只给事实与关键数据，注明出处名称与年份，不要编造。控制在 400 字内。' },
+            { role: 'user', content: query }
+        ], null, 1200, ctrl.signal, { searchPayload: payload });
+    } catch (e) {
+        if (e && e.name === 'AbortError') {
+            throw new Error(`请求超时（${Math.round(SEARCH_TIMEOUT / 1000)} 秒）`);
+        }
+        throw e;
+    } finally {
+        clearTimeout(timer);
+    }
 
     return [{
         title: 'AI 联网检索结果',
@@ -252,9 +358,32 @@ async function researchSearchBuiltin(query) {
 
 async function researchSearch(query) {
     const { mode, cfg } = await resolveSearchMode();
-    if (mode === 'off') throw new Error('当前模型没有联网能力，需要配一个搜索 API');
-    if (mode === 'builtin') return await researchSearchBuiltin(query);
-    return await researchSearchApi(query, cfg);
+    const chain = await buildSearchChain(mode, cfg);
+    if (!chain.length) throw new Error('当前模型没有联网能力，需要配一个搜索 API 或备用搜索');
+
+    const errors = [];
+    for (let i = 0; i < chain.length; i++) {
+        const step = chain[i];
+        try {
+            const hits = step.kind === 'builtin'
+                ? await researchSearchBuiltin(query)
+                : await researchSearchApi(query, step);
+            if (hits && hits.length) {
+                if (i > 0) {
+                    // 用了后面的路：告诉用户主搜索挂了，但写作没被打断
+                    ui.showToast(`主搜索不可用，已自动切到「${step.label}」`, 3200);
+                }
+                return hits;
+            }
+            errors.push(`${step.label}：没有结果`);
+        } catch (e) {
+            errors.push(`${step.label}：${e.message}`);
+            if (i + 1 < chain.length) {
+                ui.showToast(`「${step.label}」不可用，正在换下一个…`, 2000);
+            }
+        }
+    }
+    throw new Error('所有检索方式都失败了（' + errors.join('；') + '）');
 }
 
 // ===== 检索排序（BM25）=====
@@ -657,6 +786,22 @@ function researchInsert() {
 // ===== 配置弹窗 =====
 async function openResearchConfig() {
     const cfg = await getResearchConfig();
+
+    // 备用搜索一行：选服务 + 填 Key。留空表示不用这一行。
+    const backupRow = (i) => {
+        const b = (cfg.backups || [])[i] || {};
+        return `
+            <div class="rs-backup-row">
+                <select class="rs-select rs-backup-provider" data-i="${i}">
+                    <option value="">备用 ${i + 1}：不使用</option>
+                    ${Object.entries(RESEARCH_PROVIDERS).map(([k, v]) =>
+                        `<option value="${k}" ${b.provider === k ? 'selected' : ''}>${escapeHtml(v.label)}</option>`).join('')}
+                </select>
+                <input class="rs-input rs-backup-key" data-i="${i}" type="password" placeholder="API Key"
+                       value="${escapeAttr(b.apiKey || '')}">
+            </div>`;
+    };
+
     const body = `
         <div class="rs-cfg">
             <div class="rs-cfg-label">检索方式</div>
@@ -693,6 +838,15 @@ async function openResearchConfig() {
                 </label>
             </div>
 
+            <div class="rs-cfg-block" id="rs-backup-block">
+                <div class="rs-cfg-label" style="margin-top:16px">备用搜索（可选，最多两个）</div>
+                <div class="rs-cfg-tip" style="margin-bottom:8px">
+                    主搜索超时、报错或没结果时，按顺序自动切换。一家挂了还能换另一家查，不至于整个联网功能瘫掉。
+                </div>
+                ${backupRow(0)}
+                ${backupRow(1)}
+            </div>
+
             <div class="rs-cfg-tip" id="rs-builtin-tip" style="margin-top:12px;display:none">
                 内置联网由模型服务端执行搜索，你只能拿到答案、拿不到来源列表，也无法沉淀成资料。<br>
                 <b>DeepSeek 按次计费</b>：5 元 / 1000 次（约 ¥0.005/次），2026-11-01 起收费，之前免费；无结果或失败不计费。
@@ -710,8 +864,10 @@ async function openResearchConfig() {
         const mode = document.querySelector('input[name="rs-mode"]:checked').value;
         const apiBlock = document.getElementById('rs-api-block');
         const builtinTip = document.getElementById('rs-builtin-tip');
+        const backupBlock = document.getElementById('rs-backup-block');
         if (apiBlock) apiBlock.style.display = mode === 'api' ? 'block' : 'none';
         if (builtinTip) builtinTip.style.display = mode === 'builtin' ? 'block' : 'none';
+        if (backupBlock) backupBlock.style.display = mode === 'off' ? 'none' : 'block';
         updateProviderHint();
     };
     document.querySelectorAll('input[name="rs-mode"]').forEach(el => el.addEventListener('change', sync));
@@ -739,9 +895,21 @@ async function saveResearchConfig() {
     if (mode === 'api' && !apiKey) { ui.showToast('选了搜索 API，但还没填 Key'); return; }
     if (reader && !/^https?:\/\//.test(reader)) { ui.showToast('抓取代理地址要以 http(s):// 开头'); return; }
 
-    await setResearchConfig({ mode, provider, apiKey, reader, autoFetch, count: 6 });
+    // 备用搜索：选了服务就必须填 Key，留空整行忽略
+    const backups = [];
+    let backupIncomplete = false;
+    document.querySelectorAll('.rs-backup-row').forEach((row) => {
+        const p = row.querySelector('.rs-backup-provider').value;
+        const k = row.querySelector('.rs-backup-key').value.trim();
+        if (!p && !k) return;
+        if (!p || !k) { backupIncomplete = true; return; }
+        backups.push({ provider: p, apiKey: k });
+    });
+    if (backupIncomplete) { ui.showToast('备用搜索要同时选服务、填 Key'); return; }
+
+    await setResearchConfig({ mode, provider, apiKey, backups, reader, autoFetch, count: 6 });
     closeModal();
-    ui.showToast('已保存');
+    ui.showToast(backups.length ? `已保存（含 ${backups.length} 个备用搜索）` : '已保存');
     if (store.currentPage === 'research') navigateTo('research', {}, true);
 }
 
@@ -826,30 +994,35 @@ async function showResearchSheet(novelId) {
     .rs-result-head span:first-child{margin-right:auto}
     .rs-list{display:flex;flex-direction:column;gap:8px}
     .rs-item{display:flex;gap:10px;padding:12px 13px;border:1px solid #e8e8e8;border-radius:10px;background:#fff;cursor:pointer}
-    .rs-item.on{border-color:#6366f1;background:#f7f7ff}
+    .rs-item.on{border-color:var(--primary);background:var(--primary-soft)}
     .rs-check{flex:none;width:18px;height:18px;border-radius:5px;border:1.5px solid #d5d5d5;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;margin-top:2px}
-    .rs-item.on .rs-check{background:#6366f1;border-color:#6366f1}
+    .rs-item.on .rs-check{background:var(--primary);border-color:var(--primary)}
     .rs-body{min-width:0;flex:1}
     .rs-title{font-size:14.5px;font-weight:600;line-height:1.45;margin-bottom:4px;word-break:break-word}
     .rs-snippet{font-size:13px;color:#5f5f5f;line-height:1.65;word-break:break-word}
     .rs-meta{display:flex;gap:10px;align-items:center;font-size:11.5px;color:#a0a0a0;margin-top:6px;flex-wrap:wrap}
-    .rs-site{color:#6366f1}
-    .rs-url{color:#6366f1;text-decoration:none}
+    .rs-site{color:var(--primary)}
+    .rs-url{color:var(--primary);text-decoration:none}
     .rs-actions{display:flex;gap:10px;margin-top:16px}
     .rs-actions .btn{flex:1}
-    .rs-cfg-label{font-size:12px;color:#8b8b8b;margin:0 0 8px}
-    .rs-radio{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid #e8e8e8;border-radius:10px;margin-bottom:8px;font-size:14px}
+    .rs-cfg-label{font-size:12.5px;color:var(--text-secondary);font-weight:600;margin:0 0 8px}
+    .rs-radio{display:flex;gap:10px;align-items:flex-start;padding:11px 13px;border:1px solid var(--border);border-radius:12px;margin-bottom:8px;font-size:13.5px;background:var(--surface);cursor:pointer}
     .rs-radio input{margin-top:3px}
     .rs-radio b{display:block;font-weight:600;font-size:14px}
-    .rs-radio em{display:block;font-style:normal;font-size:12px;color:#9a9a9a;line-height:1.55;margin-top:2px}
-    .rs-cfg-block{margin-top:14px;padding:14px;border:1px solid #eee;border-radius:10px;background:#fafafa}
-    .rs-cfg-tip{font-size:11.5px;color:#a0a0a0;line-height:1.6;margin-top:6px}
+    .rs-radio em{display:block;font-style:normal;font-size:11.5px;color:var(--text-tertiary);line-height:1.6;margin-top:3px}
+    .rs-cfg-block{margin-top:12px;padding:14px;border:1px solid var(--border);border-radius:12px;background:var(--bg)}
+    .rs-cfg-tip{font-size:11.5px;color:var(--text-tertiary);line-height:1.7;margin-top:6px}
     .rs-cfg-actions{display:flex;gap:10px;margin-top:18px}
     .rs-cfg-actions .btn{flex:1}
-    .rs-badge{background:#eef0ff;color:#5b5fd6;padding:1px 6px;border-radius:4px;font-size:11px}
+    .rs-badge{background:var(--primary-soft);color:var(--primary);padding:1px 6px;border-radius:4px;font-size:11px}
     .rs-fetch{background:none;border:1px dashed #c9c9e8;color:#5b5fd6;border-radius:6px;padding:2px 8px;font-size:11.5px;cursor:pointer;font-family:inherit}
     .rs-fetch:active{background:#f2f2ff}
-    .rs-check-line{display:flex;align-items:center;gap:8px;font-size:13px;margin-top:12px;color:#5f5f5f}
+    .rs-select,.rs-input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-size:13.5px;font-family:inherit;outline:none}
+    .rs-select:focus,.rs-input:focus{border-color:var(--primary)}
+    .rs-backup-row{display:flex;gap:8px;margin-bottom:8px}
+    .rs-backup-row .rs-select{flex:0 0 44%;min-width:0}
+    .rs-backup-row .rs-input{flex:1;min-width:0}
+    .rs-check-line{display:flex;align-items:center;gap:8px;font-size:13px;margin-top:12px;color:var(--text-secondary)}
     .rs-busy{opacity:.55;pointer-events:none}
     .rs-help{font-size:13.5px;line-height:1.8;color:#4a4740}
     .rs-help b{display:block;margin:16px 0 4px;font-size:14px;color:#1b1a17}

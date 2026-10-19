@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.18.5',   // 与 package.json 保持一致
+    VERSION: '2.18.6',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -2443,7 +2443,7 @@ function showSearchCostConfirm() {
                 <li><b>2026 年 11 月 1 日 00:00 起</b>正式收费，之前免费</li>
                 <li>搜索无结果、请求失败或超时 <b>不计费</b></li>
             </ul>
-            <p style="margin:0 0 12px">开启后，每发一条消息会检索一次（「继续」这类续写指令除外，不花这次钱）；按钮上会显示本次已检索次数。</p>
+            <p style="margin:0 0 12px">开启后，每发一条消息会检索一次（「继续」这类续写指令除外，不花这次钱）；按钮上会显示本次已检索次数。主搜索不可用时会自动切到备用搜索，不会卡住。</p>
             <p style="margin:0 0 6px"><b>想完全免费</b>：改用搜索 API —— Tavily 每月 1000 次免费、Serper 注册送 2500 次、博查有免费额度，结果还能沉淀成资料。</p>
             <label class="rs-check-line" style="margin-top:12px">
                 <input type="checkbox" id="rs-cost-ack">
