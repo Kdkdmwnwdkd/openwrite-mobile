@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.19.0',   // 与 package.json 保持一致
+    VERSION: '2.19.1',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -902,6 +902,14 @@ ${chapterContent}
 【你的任务】
 找出问题，不是验证正确性。没发现问题时才输出空数组，不要为了凑数硬编。
 
+【必查清单】逐项过一遍，有问题才报
+1. 梗概感：把「决定—行动—成功」挤在一段里，没有现场动作和阻碍。正常应是 触发→尝试→阻碍→再尝试→代价。
+2. 情绪标签：直接写「他感到愤怒」「她心里一阵悲凉」。应换成身体动作或环境反应。
+3. 对白汇报腔：人物说出双方都知道的信息、每句都完整礼貌、像在接受采访。真实对话会有打断、回避、答非所问。
+4. 冲突无代价：主角一次就成功、失败不改变任何东西、赢了也没带来新麻烦。
+5. 章末钩子：只写「真正的危机才刚开始」这类空泛预告。有效钩子是给新信息、反常物件、更坏的选择、称呼变化。
+6. 话疗：在战斗或决战场景里，靠讲道理说服/感化敌人解决问题，且没有对应的武力代价。
+
 【硬性要求】
 1. 每条必须给 quote：从正文里**原样复制** 10-50 字，能定位到出问题的那一句。复制不出来说明你没读到具体问题，不要写这条。
 2. 一致性问题（category 为 consistency / factual / causal）的 fix 只写"事实应该怎么统一"，不要夹带文学创作建议。
@@ -916,7 +924,7 @@ ${chapterContent}
 【输出格式】只输出 JSON 数组，前后不要任何解释文字、不要 markdown 代码块：
 [{"severity":"S2","category":"character","quote":"原文片段","issue":"问题是什么","fix":"具体怎么改"}]
 
-category 只能取：structure | character | prose | consistency | factual | causal
+category 只能取：structure | character | prose | pacing | dialogue | hook | consistency | factual | causal
 最多 8 条，按 S1→S4 排序。没问题输出 []。`;
 
         const raw = await this.chat([
@@ -3761,6 +3769,7 @@ async function renderChapterEdit(container, novelId, chapterNum) {
             </div>
         </div>
         <div class="action-buttons-row" style="margin-top: 12px;">
+            <button class="btn btn-secondary" onclick="checkChapterLocal('${novelId}', ${chapterNum})">📋 体检</button>
             <button class="btn btn-secondary" onclick="reviewThisChapter('${novelId}', ${chapterNum})">🔍 AI审稿</button>
             <button class="btn btn-secondary" onclick="extractChapterSettings('${novelId}', ${chapterNum})">📥 提取设定</button>
             <button class="btn btn-primary" onclick="aiContinueChapter('${novelId}', ${chapterNum})">✨ AI续写本章</button>
@@ -4930,6 +4939,7 @@ async function saveAndBack(novelId, chapterNum) {
 const SEVERITY_LABEL = { S1: '致命', S2: '严重', S3: '一般', S4: '建议' };
 const REVIEW_CATEGORY_LABEL = {
     structure: '结构', character: '人物', prose: '文笔',
+    pacing: '节奏', dialogue: '对话', hook: '钩子',
     consistency: '一致性', factual: '事实', causal: '因果'
 };
 
@@ -4952,6 +4962,139 @@ function renderReviewFindings(findings, content) {
             ${f.fix ? `<div class="review-fix">改法：${escapeHtml(f.fix)}</div>` : ''}
         </div>`;
     }).join('') + `</div>`;
+}
+
+// ===== 章节体检（纯本地，不调用模型）=====
+// 这里的阈值来自几个开源写作 skill 的实测值（MIT），只取数字与判定逻辑，文案重写。
+// 为什么不做成 AI 检查：字数、对话占比、破折号、口水词这些是确定性的，
+// 让模型去数数是浪费钱且不可靠 —— 本地算完秒出，还能每章都跑。
+const CHECK_RULES = {
+    chars: { min: 1500, idealMin: 1800, idealMax: 2600, max: 3000 },
+    dialogue: { min: 15, max: 40, combatMax: 30 },
+    dash: { max: 2 },
+    halfQuote: { max: 0 },
+    notXisY: { max: 2 },
+    paragraph: { maxLen: 300, maxCount: 0 },
+    meta: { max: 0 }
+};
+
+// 只统计中文字符，标点与空白不算 —— 平台的"字数"通常也按这个口径
+function countCJK(text) {
+    return (String(text).match(/[\u4e00-\u9fff]/g) || []).length;
+}
+
+// 对话行判定：以引号开头就算。手机输入法常用「」和""，
+// 这里都认，但要单独统计半角引号（平台排版一般要求全角）
+function analyzeText(content) {
+    const text = String(content || '');
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    const total = lines.length || 1;
+
+    const dialogueLines = lines.filter(l => /^[「『“"]/.test(l)).length;
+    const dialogueRatio = Math.round(dialogueLines / total * 100);
+
+    const dashes = (text.match(/—/g) || []).length;
+    const halfQuotes = (text.match(/[""]/g) || []).length;
+    const notXisY = (text.match(/不是[^。！？\n]{2,30}[，—]是/g) || []).length;
+    const exclaims = (text.match(/[！!]/g) || []).length;
+    const metaHits = (text.match(/(本章|前文|后文|卷一|这一章里)/g) || []).length;
+    const longParas = lines.filter(l => l.length > CHECK_RULES.paragraph.maxLen);
+
+    // AI 高频口水词：出现不等于错，但密度高就是味儿
+    const AI_WORDS = ['缓缓', '不由得', '眼底闪过', '心中升起', '说不出的', '这意味着',
+                      '深邃', '不可置信', '仿佛', '犹如', '一丝', '微微', '轻轻', '淡淡',
+                      '然而', '因此', '似乎', '显然'];
+    const aiHits = AI_WORDS
+        .map(w => ({ word: w, count: text.split(w).length - 1 }))
+        .filter(x => x.count > 0)
+        .sort((a, b) => b.count - a.count);
+
+    // 句长方差：相邻三句长度接近 = 节奏匀速。比"句号密度"更稳
+    const sentences = text.split(/[。！？…]+/).map(x => x.trim()).filter(x => x.length > 1);
+    let flatRuns = 0;
+    for (let i = 2; i < sentences.length; i++) {
+        const a = sentences[i - 2].length, b = sentences[i - 1].length, c = sentences[i].length;
+        if (Math.abs(a - b) <= 3 && Math.abs(b - c) <= 3) flatRuns++;
+    }
+
+    return {
+        chars: countCJK(text),
+        dialogueRatio, dialogueLines, totalLines: total,
+        dashes, halfQuotes, notXisY, exclaims,
+        metaHits, longParas: longParas.length,
+        aiHits, aiTotal: aiHits.reduce((s, x) => s + x.count, 0),
+        flatRuns
+    };
+}
+
+// 把指标翻译成"合格 / 注意 / 超标"，并给出人话建议
+function buildCheckResults(m) {
+    const rows = [];
+    const push = (label, value, state, hint) => rows.push({ label, value, state, hint });
+    const R = CHECK_RULES;
+
+    const c = m.chars;
+    if (c < R.chars.min) push('字数', c, 'bad', `低于 ${R.chars.min}，多数平台算短章，可能影响推荐`);
+    else if (c < R.chars.idealMin) push('字数', c, 'warn', `偏短，建议 ${R.chars.idealMin}–${R.chars.idealMax}`);
+    else if (c <= R.chars.idealMax) push('字数', c, 'ok', '在本章常规区间内');
+    else if (c <= R.chars.max) push('字数', c, 'warn', `偏长，超过 ${R.chars.max} 建议拆章`);
+    else push('字数', c, 'bad', `超长，读者容易跳读，建议拆成两章`);
+
+    const d = m.dialogueRatio;
+    if (d > R.dialogue.max) push('对话占比', d + '%', 'bad', `超过 ${R.dialogue.max}%，叙事被对话挤掉，容易变成"两个人聊天"`);
+    else if (d >= 25) push('对话占比', d + '%', 'ok', '在健康区间');
+    else if (d >= R.dialogue.min) push('对话占比', d + '%', 'warn', '偏少，画面偏旁白');
+    else push('对话占比', d + '%', 'warn', '几乎没有对话，读起来会闷');
+
+    if (m.dashes > R.dash.max) push('破折号', m.dashes, 'warn', `超过 ${R.dash.max} 个，AI 写作的典型痕迹之一`);
+    else push('破折号', m.dashes, 'ok', '');
+
+    if (m.halfQuotes > 0) push('半角引号', m.halfQuotes, 'warn', '对话统一用「」，平台排版更整齐');
+    if (m.notXisY > R.notXisY.max) push('"不是X，是Y"句式', m.notXisY, 'warn', '排比式对仗，超过 2 处很像 AI 腔');
+    if (m.metaHits > 0) push('元话语', m.metaHits, 'bad', '出现"本章/前文/卷一"，这是作者在说话，不是角色在经历');
+    if (m.longParas > 0) push('超长段落', m.longParas, 'warn', `有 ${m.longParas} 段超过 ${R.paragraph.maxLen} 字，手机上一屏读不完`);
+    if (m.flatRuns >= 3) push('句式节奏', m.flatRuns + ' 处匀速', 'warn', '连续三句长度接近，读起来像流水账，试着插一个短句');
+
+    if (m.aiTotal > 0) {
+        const top = m.aiHits.slice(0, 6).map(x => `${x.word}×${x.count}`).join('、');
+        const state = m.aiTotal > 12 ? 'bad' : 'warn';
+        push('AI 高频词', m.aiTotal, state, top + (m.aiHits.length > 6 ? ' 等' : ''));
+    } else {
+        push('AI 高频词', 0, 'ok', '');
+    }
+    return rows;
+}
+
+async function checkChapterLocal(novelId, chapterNum) {
+    try {
+        const chapter = await novelManager.getChapter(novelId, chapterNum);
+        if (!chapter || !chapter.content) { ui.showToast('本章还没有正文'); return; }
+        const m = analyzeText(chapter.content);
+        const rows = buildCheckResults(m);
+        const bad = rows.filter(r => r.state === 'bad').length;
+        const warn = rows.filter(r => r.state === 'warn').length;
+
+        const label = { ok: '合格', warn: '注意', bad: '超标' };
+        const body = `
+            <div class="check-summary ${bad ? 'has-bad' : warn ? 'has-warn' : 'all-ok'}">
+                ${bad ? `${bad} 项超标` : warn ? `${warn} 项值得看一眼` : '全部指标正常'}
+                <span class="check-sub">共 ${m.chars} 字 · ${m.totalLines} 段 · 对话占 ${m.dialogueRatio}%</span>
+            </div>
+            <div class="check-list">
+                ${rows.map(r => `
+                    <div class="check-row st-${r.state}">
+                        <span class="check-name">${r.label}</span>
+                        <span class="check-val">${escapeHtml(String(r.value))}</span>
+                        <span class="check-tag">${label[r.state]}</span>
+                        ${r.hint ? `<div class="check-hint">${escapeHtml(r.hint)}</div>` : ''}
+                    </div>`).join('')}
+            </div>
+            <div class="check-foot">纯本地计算，不消耗模型额度。判定阈值参考公开写作规范，只作提示，不是平台官方标准。</div>`;
+
+        createModal(`章节体检 · 第${chapterNum}章`, body).show();
+    } catch (e) {
+        ui.showToast('体检失败: ' + e.message);
+    }
 }
 
 async function reviewThisChapter(novelId, chapterNum) {

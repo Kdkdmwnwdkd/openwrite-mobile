@@ -5054,3 +5054,62 @@ body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary
     border-color: rgba(245, 158, 11, 0.45);
     background: rgba(245, 158, 11, 0.08);
 }
+
+/* ===== 章节体检（纯本地规则） ===== */
+.check-summary {
+    font-size: 14px;
+    font-weight: 600;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+}
+.check-summary.all-ok { background: rgba(34, 197, 94, 0.10); color: #15803d; }
+.check-summary.has-warn { background: rgba(245, 158, 11, 0.12); color: #b45309; }
+.check-summary.has-bad { background: rgba(220, 38, 38, 0.10); color: #b91c1c; }
+.check-sub {
+    display: block;
+    font-weight: 400;
+    font-size: 12px;
+    opacity: 0.75;
+    margin-top: 4px;
+}
+.check-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 60vh;
+    overflow-y: auto;
+}
+.check-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+.check-name { font-size: 13px; font-weight: 500; }
+.check-val { font-size: 13px; font-variant-numeric: tabular-nums; }
+.check-tag {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text-tertiary);
+    margin-left: auto;
+}
+.st-bad .check-tag { color: #b91c1c; background: rgba(220, 38, 38, 0.10); }
+.st-warn .check-tag { color: #b45309; background: rgba(245, 158, 11, 0.12); }
+.check-hint {
+    flex-basis: 100%;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+.check-foot {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 12px;
+    line-height: 1.6;
+}
