@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.26.0',   // 与 package.json 保持一致
+    VERSION: '2.26.1',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -8123,22 +8123,35 @@ async function renderPacingOverview(container, novelId) {
         return;
     }
 
+    // 导入的旧备份里 number 可能是字符串，这里统一成数字，
+    // 否则 beatsMap[ch.number] 取不到、fmtRange 又会把字符串全部过滤掉
     const beatsMap = novel.beats || {};
     const rows = chapters.map(ch => {
-        const bs = (beatsMap[ch.number] || []).filter(b => b && (b.desc || b.content));
-        if (!bs.length) return { num: ch.number, title: ch.title, empty: true };
+        const num = Number(ch.number);
+        const title = typeof ch.title === 'string' ? ch.title : '';
+        const raw = beatsMap[num] || beatsMap[String(num)] || [];
+        const bs = (Array.isArray(raw) ? raw : []).filter(b => beatContent(b));
+        if (!bs.length) return { num, title, empty: true };
+        // 白名单累加：直接用 sum[b.type] 的话，type 为 "constructor"/"toString"
+        // 会命中 Object.prototype 上的属性，Object.values 里混进函数，total 变 NaN，
+        // 所有百分比一起失效、规则静默不报警
         const sum = { setup: 0, transition: 0, conflict: 0, climax: 0, hook: 0 };
+        let pctSum = 0;
         bs.forEach(b => {
-            const t = sum[b.type] !== undefined ? b.type : 'transition';
-            sum[t] += Number(b.pct) || 0;
+            const t = Object.prototype.hasOwnProperty.call(sum, b.type) ? b.type : 'transition';
+            const pct = Number(b.pct);
+            sum[t] += Number.isFinite(pct) ? pct : 0;
+            pctSum += Number.isFinite(pct) ? pct : 0;
         });
-        const total = Object.values(sum).reduce((a, b) => a + b, 0) || 1;
+        // pct 全为 0 或缺失：这一章的节拍是废的，等同没有节拍
+        if (pctSum <= 0) return { num, title, empty: true };
+        const total = pctSum;
         // 第一次冲突/高潮出现在第几条（1 起算，0 = 整章都没有）
         const hotIdx = bs.findIndex(b => b.type === 'conflict' || b.type === 'climax') + 1;
         // 前三条是否全是铺垫/过渡
         const firstThree = bs.slice(0, 3);
-        const slowThree = firstThree.length === 3 && firstThree.every(b => b.type === 'setup' || b.type === 'transition');
-        return { num: ch.number, title: ch.title, sum, total, count: bs.length, firstHot: hotIdx, slowThree };
+        const slowThree = firstThree.length >= 3 && firstThree.every(b => b.type === 'setup' || b.type === 'transition');
+        return { num, title, sum, total, count: bs.length, firstHot: hotIdx, slowThree };
     });
 
     // 诊断：只说真问题，不凑数
@@ -8151,27 +8164,33 @@ async function renderPacingOverview(container, novelId) {
         });
     }
 
-    const slowOpen = rows.filter(r => !r.empty && (r.slowThree || r.firstHot === 0)).map(r => r.num);
+    // 开场三拍全铺垫：只看开头几章。
+    // 这条规则放到全书上会把每一章都列出来（正文里铺垫段本来就多），纯噪声；
+    // 它真正该管的是"读者还没建立信任你就一直铺垫"。
+    const OPEN_WINDOW = 5;
+    const slowOpen = rows.filter(r => !r.empty && r.num <= OPEN_WINDOW && (r.slowThree || r.firstHot === 0)).map(r => r.num);
     if (slowOpen.length) {
         issues.push({
             level: 'warn',
-            text: '第 ' + fmtRange(slowOpen) + ' 章前三条节拍都在铺垫（或者整章没有冲突），第一次冲突来得偏晚。'
+            text: '开头第 ' + fmtRange(slowOpen) + ' 章前几条节拍都在铺垫（或者整章没有冲突），第一次冲突来得偏晚。'
         });
     }
 
     // 连续 4 章以上高潮占比 < 5%
+    // 空章（没有节拍）也要计入连续段：模型自己发挥，很可能整章都没有高潮，
+    // 之前这里把空章当成"切断"，前后各三章无高潮反而永远不报警。
     let run = [];
     const flushRun = () => {
         if (run.length >= 4) {
             issues.push({
                 level: 'warn',
-                text: '第 ' + fmtRange(run.map(r => r.num)) + ' 章连续没有高潮（climax 占比低于 5%），读者容易中途弃。'
+                text: '第 ' + fmtRange(run.map(r => r.num)) + ' 章连续 ' + run.length + ' 章没有高潮（climax 占比低于 5%），读者容易中途弃。'
             });
         }
         run = [];
     };
     rows.forEach(r => {
-        if (r.empty) { flushRun(); return; }
+        if (r.empty) { run.push(r); return; }
         const c = (r.sum.climax / r.total) * 100;
         if (c < 5) run.push(r); else flushRun();
     });
@@ -8211,9 +8230,9 @@ async function renderPacingOverview(container, novelId) {
             <div class="pace-list">
                 ${rows.map(r => `
                     <div class="pace-row${r.empty ? ' is-empty' : ''}">
-                        <div class="pace-num">${r.num}</div>
+                        <div class="pace-num">${escapeHtml(String(r.num))}</div>
                         <div class="pace-main">
-                            <div class="pace-title">${escapeHtml((r.title || '').replace(CHAPTER_PREFIX_RE, '').trim() || '未命名')}</div>
+                            <div class="pace-title">${escapeHtml(String(r.title || '').replace(CHAPTER_PREFIX_RE, '').trim() || '未命名')}</div>
                             ${barHtml(r)}
                         </div>
                         <div class="pace-meta">${r.empty ? '无节拍' : r.count + ' 拍'}</div>
@@ -8242,30 +8261,42 @@ function fmtRange(nums) {
 
 const BEAT_LABELS = { setup: '铺陈', conflict: '冲突', climax: '高潮', hook: '钩子', transition: '过渡' };
 
+// 节拍正文取哪个字段：现在的数据是 desc，早期数据用过 content/title。
+// 三处（注入 prompt、节拍控制页、节奏总览）必须用同一个取值，
+// 否则同一批节拍在注入时算有效、在页面上却是空白。
+function beatContent(b) {
+    if (!b) return '';
+    return String(b.desc || b.content || b.title || '');
+}
+
 function beatRowHtml(b, i) {
-    const t = b.type || 'transition';
+    const t = Object.prototype.hasOwnProperty.call(BEAT_LABELS, b.type) ? b.type : 'transition';
     const opt = (v) => '<option value="' + v + '"' + (t === v ? ' selected' : '') + '>'
         + BEAT_LABELS[v] + '</option>';
-    // 落地状态：写完对照后才有，存在内存里，不写库
+    // 落地状态：对照正文后才有，会随节拍一起存库
     const f = b.fulfill;
-    const statusHtml = f
-        ? '<span class="beat-status st-' + f.status + '">'
-          + (f.status === 'done' ? '已写' : f.status === 'partial' ? '部分' : '没写') + '</span>'
+    // status / pct 都可能来自导入的旧备份，不能直接拼进 class 和属性
+    const st = f && ['done', 'partial', 'missed'].includes(f.status) ? f.status : '';
+    const statusHtml = st
+        ? '<span class="beat-status st-' + st + '">'
+          + (st === 'done' ? '已写' : st === 'partial' ? '部分' : '没写') + '</span>'
         : '';
-    return '<div class="beat-item' + (f ? ' has-status st-' + f.status : '') + '" data-idx="' + i + '">'
+    const pctVal = Number(b.pct);
+    const safePct = Number.isFinite(pctVal) && pctVal > 0 ? Math.min(100, Math.round(pctVal)) : 10;
+    return '<div class="beat-item' + (st ? ' has-status st-' + st : '') + '" data-idx="' + i + '">'
         + '<div class="beat-num">' + (i + 1) + '</div>'
         + '<div style="flex:1;min-width:0;">'
         + '<div class="beat-row-top">'
         + '<select class="input beat-type" id="beat-type-' + i + '">'
         + opt('setup') + opt('conflict') + opt('climax') + opt('hook') + opt('transition')
         + '</select>'
-        + '<input type="number" class="input beat-pct" id="beat-pct-' + i + '" value="' + (b.pct || 10) + '" min="1" max="100">'
+        + '<input type="number" class="input beat-pct" id="beat-pct-' + i + '" value="' + safePct + '" min="1" max="100">'
         + '<span class="beat-pct-unit">%</span>'
         + statusHtml
         + '<button class="beat-del" onclick="removeBeat(' + i + ')">✕</button>'
         + '</div>'
         + '<input type="text" class="input beat-desc" id="beat-desc-' + i + '"'
-        + ' value="' + escapeAttr(b.desc || '') + '"'
+        + ' value="' + escapeAttr(beatContent(b)) + '"'
         + ' placeholder="谁在哪做了什么，到这一步什么变了">'
         + (f && f.evidence ? '<div class="beat-evidence">「' + escapeHtml(f.evidence) + '」</div>' : '')
         + (f && f.note ? '<div class="beat-note">' + escapeHtml(f.note) + '</div>' : '')
@@ -8291,14 +8322,25 @@ function readBeatsFromDom() {
     if (!items.length) return;
     const out = [];
     items.forEach((el, i) => {
-        const type = (document.getElementById('beat-type-' + i) || {}).value || 'transition';
-        const pct = parseInt((document.getElementById('beat-pct-' + i) || {}).value || '10', 10);
-        const desc = (document.getElementById('beat-desc-' + i) || {}).value || '';
-        const prev = beatEditData.beats[i] || {};
-        // 重绘时把落地状态带过去，否则每改一个字结果就没了
-        out.push({ type, label: BEAT_LABELS[type] || '过渡', desc, pct, fulfill: prev.fulfill });
+        // 用元素自身的 data-idx 定位控件，不靠全局 getElementById：
+        // 页面上如果同时存在第二个节拍列表，id 会撞车，取到别的章节的值。
+        const idx = Number(el.getAttribute('data-idx'));
+        const at = Number.isInteger(idx) && idx >= 0 && idx < beatEditData.beats.length ? idx : i;
+        const typeSel = el.querySelector('.beat-type');
+        const pctIn = el.querySelector('.beat-pct');
+        const descIn = el.querySelector('.beat-desc');
+        const type = (typeSel && typeSel.value) || 'transition';
+        const pct = parseInt((pctIn && pctIn.value) || '10', 10);
+        const desc = (descIn && descIn.value) || '';
+        const prev = beatEditData.beats[at] || {};
+        // 描述改了，这条节拍对应的正文就没法再判定，旧的「已写/没写」必须作废，
+        // 否则改完描述还挂着旧状态，作者会以为对照结果仍然成立。
+        const sameDesc = beatContent(prev) === String(desc);
+        const fulfill = sameDesc ? prev.fulfill : undefined;
+        out[at] = { type, label: BEAT_LABELS[type] || '过渡', desc, pct, fulfill };
     });
-    beatEditData.beats = out;
+    // 保持原顺序（out 是按下标写入的），过滤掉没写到的空位
+    beatEditData.beats = out.filter(Boolean);
 }
 
 async function renderBeatControl(container, novelId, chapterNum) {
@@ -8330,7 +8372,7 @@ async function renderBeatControl(container, novelId, chapterNum) {
 // 用户得自己填，实际没人填；更糟的是这 4 个空框会被当成节拍注入 prompt。
 async function aiDraftBeats(novelId, chapterNum) {
     readBeatsFromDom();
-    if (beatEditData && beatEditData.beats.some(b => b.desc)) {
+    if (beatEditData && beatEditData.beats.some(b => beatContent(b))) {
         if (!confirm('这一章已经有节拍了。重新拆会覆盖现有的内容，继续？')) return;
     }
 
@@ -8378,7 +8420,7 @@ async function aiDraftBeats(novelId, chapterNum) {
         if (!plan) { ui.showToast('没拆出来（模型返回格式不对），再试一次'); return; }
 
         beatEditData.beats = plan.beats.slice(0, 12).map(b => {
-            const type = BEAT_LABELS[b.type] ? b.type : 'transition';
+            const type = Object.prototype.hasOwnProperty.call(BEAT_LABELS, b.type) ? b.type : 'transition';
             return {
                 type,
                 label: BEAT_LABELS[type],
@@ -8398,8 +8440,15 @@ async function aiDraftBeats(novelId, chapterNum) {
 // 模型经常"跳着写"——第 3 条写了，第 4 条直接略过去接第 5 条，
 // 作者事后很难发现，下一章就接不上了。
 async function checkBeatFulfillment(novelId, chapterNum) {
+    // 关键防护：beatEditData 是全局的。模型返回前用户可能已经切到别的章节，
+    // 这时把结果写进 beatEditData.beats、再用入参 chapterNum 存库，
+    // 等于把 A 章的节拍存到了 B 章上，双向错乱。所以先核对当前编辑的到底是哪一章。
+    if (!beatEditData || beatEditData.novelId !== novelId || beatEditData.chapterNum !== chapterNum) {
+        ui.showToast('页面已经切到别的章节了，请回到本章再对照');
+        return;
+    }
     readBeatsFromDom();
-    const beats = (beatEditData && beatEditData.beats || []).filter(b => b.desc);
+    const beats = (beatEditData && beatEditData.beats || []).filter(b => beatContent(b));
     if (!beats.length) { ui.showToast('先拆或先写几条节拍'); return; }
 
     const chapter = await novelManager.getChapter(novelId, chapterNum);
@@ -8428,19 +8477,32 @@ async function checkBeatFulfillment(novelId, chapterNum) {
         const plan = parseJsonLoose(raw, '{', '}', (v) => v && Array.isArray(v.results));
         if (!plan) { ui.showToast('没对上（模型返回格式不对），再试一次'); return; }
 
-        const byIdx = {};
-        plan.results.forEach(r => { byIdx[Number(r.idx)] = r; });
         // 注意：模型返回的 idx 是"过滤掉空描述之后"的序号，
         // 而 beatEditData.beats 里可能有 desc 为空的占位行。
         // 直接用全量下标回填会整体错位，所以按同一套过滤顺序回填。
-        const targets = beatEditData.beats.filter(b => b.desc);
+        const targets = beatEditData.beats.filter(b => beatContent(b));
+        // 模型少返回几条 ≠ 那几条"没写"。把缺失的判成 missed 会全红一片，
+        // 还把这个假阴性存进库，作者就再也看不到真实结果了。
+        // 缺失的条目标成 unknown：不出状态标签、不落库、不计入统计。
+        const byIdx = {};
+        plan.results.forEach(r => {
+            const i = Number(r.idx);
+            // 越界或重复的 idx 直接丢弃，防止贴到错误的节拍上
+            if (!Number.isInteger(i) || i < 1 || i > targets.length || byIdx[i]) return;
+            byIdx[i] = r;
+        });
+        const judged = Object.keys(byIdx).length;
+        if (!judged) { ui.showToast('模型没给出任何判断，再试一次'); return; }
+
         targets.forEach((b, i) => {
             const r = byIdx[i + 1];
-            b.fulfill = r ? {
-                status: ['done', 'partial', 'missed'].includes(r.status) ? r.status : 'partial',
+            if (!r) { b.fulfill = undefined; return; }
+            const status = ['done', 'partial', 'missed'].includes(r.status) ? r.status : 'unknown';
+            b.fulfill = status === 'unknown' ? undefined : {
+                status,
                 evidence: String(r.evidence || '').slice(0, 80),
                 note: String(r.note || '').slice(0, 80)
-            } : { status: 'missed', evidence: '', note: '没有返回这一条的判断' };
+            };
         });
 
         paintBeats();
@@ -8448,9 +8510,10 @@ async function checkBeatFulfillment(novelId, chapterNum) {
         try { await novelManager.saveBeats(novelId, chapterNum, beatEditData.beats); } catch (_) {}
         const miss = beatEditData.beats.filter(b => b.fulfill && b.fulfill.status === 'missed').length;
         const part = beatEditData.beats.filter(b => b.fulfill && b.fulfill.status === 'partial').length;
-        ui.showToast(miss || part
+        const unjudged = targets.length - judged;
+        ui.showToast((miss || part
             ? `没写 ${miss} 条、写了一半 ${part} 条`
-            : '每条都写到了', 4000);
+            : '每条都写到了') + (unjudged ? `，${unjudged} 条没判出来` : ''), 4000);
     } catch (e) {
         ui.showToast('对照失败：' + e.message);
     }
@@ -8475,8 +8538,28 @@ async function saveBeatControl() {
     readBeatsFromDom();
     const { novelId, chapterNum, beats } = beatEditData;
     try {
-        await novelManager.saveBeats(novelId, chapterNum, beats);
-        ui.showToast('节拍已保存（' + beats.length + ' 条）');
+        // 只落合法的落地状态：导入的旧备份里 fulfill.status 可能是任意字符串，
+        // 直接存下去会被 beatRowHtml 拼进 class
+        const clean = beats.map(b => {
+            const o = {
+                type: Object.prototype.hasOwnProperty.call(BEAT_LABELS, b.type) ? b.type : 'transition',
+                label: BEAT_LABELS[b.type] || '过渡',
+                desc: beatContent(b),
+                pct: Math.max(1, Math.min(100, Number(b.pct) || 10))
+            };
+            if (b.fulfill && ['done', 'partial', 'missed'].includes(b.fulfill.status)) {
+                o.fulfill = {
+                    status: b.fulfill.status,
+                    evidence: String(b.fulfill.evidence || '').slice(0, 80),
+                    note: String(b.fulfill.note || '').slice(0, 80)
+                };
+            }
+            return o;
+        });
+        await novelManager.saveBeats(novelId, chapterNum, clean);
+        beatEditData.beats = clean;
+        paintBeats();
+        ui.showToast('节拍已保存（' + clean.length + ' 条）');
     } catch (e) {
         ui.showToast('保存失败：' + e.message);
     }
