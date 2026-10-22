@@ -18,7 +18,7 @@ https://gh-proxy.com/https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/la
 |------|------|----------|
 | **镜像 + latest（推荐）** | 见上面代码块 | 1.87 MB/s · 2.2s |
 | 备用镜像 | `https://ghfast.top/https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/latest/download/app-debug.apk` | 968 KB/s · 4.2s |
-| CDN（版本化） | `https://testingcf.jsdelivr.net/gh/Kdkdmwnwdkd/openwrite-mobile@dist/apk/app-2.14.0.apk` | 1.05 MB/s |
+| CDN（备用） | 文件名形如 `app-2.18.7-aab06a9.apk`，见 `dist` 分支的 `apk/README.md` | 1.05 MB/s |
 | 原始（GitHub） | [app-debug.apk](https://github.com/Kdkdmwnwdkd/openwrite-mobile/releases/latest/download/app-debug.apk) | 18 KB/s |
 
 > 这是**自有签名**的测试包（`CN=OpenWrite Mobile`），签名从此固定。
@@ -35,7 +35,9 @@ GitHub Release 在国内直连只有十几 KB/s，4 MB 的包要等三分钟，�
 1. **固定指向最新版**：用 `releases/latest/download/` 而不是 `releases/download/<tag>/`，镜像前缀后面接上即可，发版不改地址。
 2. **CDN 兜底**：构建完成后自动把 APK 推到 `dist` 分支（单提交、强制覆盖，仓库不会随版本膨胀），jsDelivr 把仓库当 CDN 用，比 GitHub 快一个数量级。
 
-> 注意：CDN 那条要写带版本号的路径（`app-2.14.0.apk`）。实测 jsDelivr 对固定路径 `apk/app-debug.apk` 有源站级缓存，`purge` 也清不掉，发版后仍会返回上一版——宁可链接长一点，也不能让人装到旧包。同一版本号重复构建时它也会滞后，要绝对准确就用上面那条 `latest`。
+> 注意：CDN 那条的文件名是「版本 + 提交短号」（如 `app-2.18.7-aab06a9.apk`），每次构建都不一样。
+> 实测 jsDelivr 对固定路径有源站级长缓存，`purge` 返回 `finished` 也清不掉：同一个版本号重复构建时（比如重跑 CI），旧路径仍会返回上一次的内容，用户装到旧包却以为是最新的。加提交短号才能保证每次都回源。
+> 要「永远指向最新」，用上面那条 `latest`。
 
 ## 功能特性
 

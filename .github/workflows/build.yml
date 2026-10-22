@@ -186,16 +186,17 @@ jobs:
           set -e
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
           VERSION=$(node -p "require('./package.json').version")
+          SHORT=${GITHUB_SHA::7}
           SIZE=$(stat -c%s "$APK")
           SHA=$(sha256sum "$APK" | awk '{print $1}')
 
           rm -rf /tmp/distrepo && mkdir -p /tmp/distrepo/apk
           cd /tmp/distrepo
-          # 只放带版本号的文件名。
-          # 实测 jsDelivr 对同一路径（apk/app-debug.apk）有源站级长缓存，
-          # purge 清不掉，发版后仍会返回上一版——那比慢更糟，会让人装到旧包。
-          # 带版本号的路径每次不同，必定回源，立即拿到新包。
-          cp "$GITHUB_WORKSPACE/$APK" "apk/app-${VERSION}.apk"
+          # 文件名带「版本 + 提交短号」。
+          # 实测 jsDelivr 对同一路径有源站级长缓存，purge 返回 finished 也清不掉：
+          # 同一个版本号重复构建时（比如修 CI、重跑），该路径仍会返回上一次的内容，
+          # 用户装到的是旧包却以为是最新的。加上提交短号，每次构建路径都不同，必定回源。
+          cp "$GITHUB_WORKSPACE/$APK" "apk/app-${VERSION}-${SHORT}.apk"
           {
             echo "OpenWrite Android 安装包（自动同步，勿手改）"
             echo
@@ -204,15 +205,15 @@ jobs:
             echo "大小：${SIZE} 字节"
             echo "SHA-256：${SHA}"
             echo
-            echo "下载：https://testingcf.jsdelivr.net/gh/${{ github.repository }}@dist/apk/app-${VERSION}.apk"
+            echo "下载：https://testingcf.jsdelivr.net/gh/${{ github.repository }}@dist/apk/app-${VERSION}-${SHORT}.apk"
           } > apk/README.md
 
           git init -q
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git add -f "apk/app-${VERSION}.apk" apk/README.md
+          git add -f "apk/app-${VERSION}-${SHORT}.apk" apk/README.md
           git commit -q -m "dist: v${VERSION} ${GITHUB_SHA::7}"
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:dist
 
           echo "purging CDN cache..."
-          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@dist/apk/app-${VERSION}.apk" | head -c 200 || true
+          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@dist/apk/app-${VERSION}-${SHORT}.apk" | head -c 200 || true
