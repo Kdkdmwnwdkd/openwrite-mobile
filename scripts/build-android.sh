@@ -21,7 +21,6 @@ echo ""
 echo "Checking prerequisites..."
 check_command node || exit 1
 check_command npm || exit 1
-check_command python3 || exit 1
 
 NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
 if [ "$NODE_VERSION" -lt 22 ]; then
@@ -37,12 +36,6 @@ echo ""
 # Install dependencies
 echo "Installing Node.js dependencies..."
 npm install
-
-echo ""
-echo "Installing Python dependencies..."
-cd backend
-pip install -r requirements.txt
-cd ..
 
 # Check if Capacitor platforms are added
 echo ""

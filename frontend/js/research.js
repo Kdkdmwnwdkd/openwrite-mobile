@@ -147,6 +147,8 @@ async function resolveSearchMode() {
     if (await currentModelSupportsBuiltin()) return { mode: 'builtin', cfg };
     // 主搜索没填、但备用里有可用 Key：也算能搜，链路里自然跳过空的主搜索
     if (cfg.mode === 'api' || cfg.apiKey || hasBackupKey) return { mode: 'api', cfg };
+    // 什么都没配，但在 App 里能直接抓搜索结果页 —— 不用 Key 也能联网
+    if (canDirectFetch()) return { mode: 'direct', cfg };
     return { mode: 'off', cfg };
 }
 
@@ -183,37 +185,11 @@ async function buildSearchChain(mode, cfg) {
 
     // API 全排在前面时，内置联网留作最后的底
     if (mode === 'api' && builtinOk) chain.push(...builtin);
+
+    // 免配置兜底：App 里直接抓搜索结果页。排在最后 —— 有正经搜索服务时优先用它们
+    // （结构化、稳定），全挂了还能靠这条把资料查回来。
+    if (canDirectFetch()) chain.push({ kind: 'direct', label: '网页抓取', tag: '免配置' });
     return chain;
-}
-
-async function researchSearch(query) {
-    const { mode, cfg } = await resolveSearchMode();
-    const chain = await buildSearchChain(mode, cfg);
-    if (!chain.length) throw new Error('当前模型没有联网能力，需要配一个搜索 API 或备用搜索');
-
-    const errors = [];
-    for (let i = 0; i < chain.length; i++) {
-        const step = chain[i];
-        try {
-            const hits = step.kind === 'builtin'
-                ? await researchSearchBuiltin(query)
-                : await researchSearchApi(query, step);
-            if (hits && hits.length) {
-                if (i > 0) {
-                    // 用了后面的路：告诉用户主搜索挂了，但写作没被打断
-                    ui.showToast(`主搜索不可用，已自动切到「${step.label}」`, 3200);
-                }
-                return hits;
-            }
-            errors.push(`${step.label}：没有结果`);
-        } catch (e) {
-            errors.push(`${step.label}：${e.message}`);
-            if (i + 1 < chain.length) {
-                ui.showToast(`「${step.label}」不可用，正在换下一个…`, 2000);
-            }
-        }
-    }
-    throw new Error('所有检索方式都失败了（' + errors.join('；') + '）');
 }
 
 // DeepSeek 的联网搜索：一次请求内完成 search → open_page → 回答。
@@ -301,6 +277,79 @@ async function fetchWithTimeout(url, opts, ms = SEARCH_TIMEOUT) {
     }
 }
 
+// ===== 零配置联网：直接抓搜索结果页 =====
+// 浏览器有同源策略：fetch 别人的网页，对方不返回 Access-Control-Allow-Origin，
+// 响应体会被浏览器丢掉 —— 所以网页版（PWA）抓不了，这不是代码问题。
+// App 里走 CapacitorHttp（原生层发请求），不受这条限制，于是"不配任何 Key 也能联网"
+// 才成立。代价是解析依赖搜索结果页的 HTML 结构，Bing 改版就可能失效，所以它排在链尾兜底。
+function canDirectFetch() {
+    const C = window.Capacitor;
+    return !!(C && typeof C.isNativePlatform === 'function' && C.isNativePlatform()
+        && C.Plugins && C.Plugins.CapacitorHttp);
+}
+
+const DIRECT_UA = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+
+async function directGet(url, timeoutMs = 12000) {
+    if (!canDirectFetch()) throw new Error('网页版无法直接抓取（跨域限制），请用 App 或配一个搜索 Key');
+    const res = await window.Capacitor.Plugins.CapacitorHttp.request({
+        url,
+        method: 'GET',
+        headers: { 'User-Agent': DIRECT_UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
+        responseType: 'text',
+        connectTimeout: 8000,
+        readTimeout: timeoutMs
+    });
+    if (res.status < 200 || res.status >= 300) throw new Error(`抓取失败（HTTP ${res.status}）`);
+    return typeof res.data === 'string' ? res.data : String(res.data || '');
+}
+
+function stripTags(s) {
+    return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function decodeEntities(s) {
+    return String(s)
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+        .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d));
+}
+
+// Bing 结果页结构：每条是 <li class="b_algo"> … <h2>标题</h2> … <p>摘要</p>
+// 注意标题的 <a> 包在 <h2> 外面（不是 <h2><a>…），链接和标题要分别取。
+function parseBingResults(html) {
+    const hits = [];
+    const blocks = String(html).split('<li class="b_algo"').slice(1);
+    for (const block of blocks) {
+        const t = block.match(/<h2[^>]*>([\s\S]*?)<\/h2>/);
+        if (!t) continue;
+        const urls = [...block.matchAll(/href="(https?:\/\/[^"]+)"/g)]
+            .map(m => decodeEntities(m[1]))
+            .filter(u => !/^https?:\/\/([\w-]+\.)*bing\.(com|net)\//i.test(u))
+            .filter(u => !/\.(css|js|png|jpe?g|gif|svg|ico|webp)(\?|$)/i.test(u));
+        if (!urls.length) continue;
+        const title = stripTags(decodeEntities(t[1]));
+        if (!title) continue;
+        const p = block.match(/<p[^>]*>([\s\S]*?)<\/p>/);
+        const snippet = p ? stripTags(decodeEntities(p[1])) : '';
+        hits.push({ title, url: urls[0], site: hostOf(urls[0]), snippet, date: '', kind: 'web' });
+        if (hits.length >= 5) break;
+    }
+    return hits;
+}
+
+async function researchDirectSearch(query) {
+    const q = encodeURIComponent(query);
+    const html = await directGet(`https://cn.bing.com/search?q=${q}&ensearch=0`);
+    const hits = parseBingResults(html);
+    if (!hits.length) {
+        throw new Error('抓到了页面但没解析出结果（可能被要求验证），换个说法或配一个搜索 Key 更稳');
+    }
+    return hits;
+}
+
 async function researchSearchApi(query, cfg) {
     const p = RESEARCH_PROVIDERS[cfg.provider];
     if (!p) throw new Error('未知的搜索服务');
@@ -367,7 +416,9 @@ async function researchSearch(query) {
         try {
             const hits = step.kind === 'builtin'
                 ? await researchSearchBuiltin(query)
-                : await researchSearchApi(query, step);
+                : step.kind === 'direct'
+                    ? await researchDirectSearch(query)
+                    : await researchSearchApi(query, step);
             if (hits && hits.length) {
                 if (i > 0) {
                     // 用了后面的路：告诉用户主搜索挂了，但写作没被打断
