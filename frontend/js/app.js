@@ -2618,11 +2618,12 @@ async function showWebSearch() {
     // 只有既没内置能力、也没填搜索 Key 时，才需要用户做选择。
     const picked = await resolveSearchMode();
     if (picked.mode === 'off') {
-        // 说清楚「为什么不能联网 + 怎么修」，别让人猜
+        // 走到这里说明：网页版 + 模型没有内置联网 + 没配搜索 Key。
+        // App 里不会出现这个分支（可以直接抓搜索结果页，零配置）。
         let mc = null;
         try { mc = await settings.getModelConfig(); } catch (e) { /* 忽略 */ }
         const d = describeBuiltinSearch(mc || {});
-        ui.showToast(`${d.reason}：${d.fix}`, 6000);
+        ui.showToast(`网页版受浏览器跨域限制，抓不了搜索结果。${d.reason}：${d.fix}`, 6500);
         openResearchConfig();
         return;
     }
@@ -2641,17 +2642,18 @@ async function showWebSearch() {
         return;
     }
 
-    enableWebSearch(false);
+    enableWebSearch(false, picked.mode === 'direct');
 }
 
-function enableWebSearch(isPaid) {
+function enableWebSearch(isPaid, isDirect = false) {
     store.webSearchOn = true;
     store.searchCount = 0;
     try { localStorage.setItem('ow_web_search', '1'); } catch (e) { /* 忽略 */ }
     renderWebSearchBtn();
-    ui.showToast(isPaid
-        ? '已联网：DeepSeek 搜索约 ¥0.005/次（11/1 起计费）'
-        : '已联网：发消息前会先检索资料', 4000);
+    let msg = '已联网：发消息前会先检索资料';
+    if (isPaid) msg = '已联网：DeepSeek 搜索约 ¥0.005/次（11/1 起计费）';
+    else if (isDirect) msg = '已联网：直接抓取搜索结果，不需要配置';
+    ui.showToast(msg, 4000);
 }
 
 // 首次开启 DeepSeek 内置搜索的确认框：把价格、计费起点、省钱办法一次讲完
