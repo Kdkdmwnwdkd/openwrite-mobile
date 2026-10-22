@@ -538,6 +538,48 @@ async function buildLayeredContext(novelId, chapterNum, hintText = '') {
 // 真正卡住 120 秒才断。
 const AI_IDLE_TIMEOUT = 120000;
 
+// 流式分片的正文提取。同样要兼容数组分段与 reasoning_content，
+// 而且这里不能把思考内容混进正文里（正文是要存进章节的）。
+function extractDeltaContent(parsed) {
+    const delta = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta;
+    if (!delta) return '';
+    if (typeof delta.content === 'string') return delta.content;
+    if (Array.isArray(delta.content)) {
+        return delta.content.map(x => (typeof x === 'string' ? x : (x && (x.text || x.content)) || '')).join('');
+    }
+    return '';
+}
+
+// 从非流式响应里取正文。不同厂商的返回结构差别比想象的大：
+// - 少数推理模型（deepseek-reasoner、部分网关的 flash 版）把内容放在
+//   reasoning_content，content 为空串
+// - 部分网关的 content 是数组分段（[{type:'text',text:'...'}]）而不是字符串
+// - 还有的返回 content 为 null
+// 只要这些任一情况出现，旧写法 `message.content || ''` 就会返回空字符串，
+// 上层只能报"模型没有返回内容"，用户完全看不出发生了什么。
+function extractMessageContent(data) {
+    const pick = (v) => {
+        if (typeof v === 'string') return v;
+        if (Array.isArray(v)) {
+            return v.map(x => {
+                if (typeof x === 'string') return x;
+                return (x && (x.text || x.content || x.partial)) || '';
+            }).join('');
+        }
+        return '';
+    };
+    const choice = data && data.choices && data.choices[0];
+    const msg = choice && choice.message;
+    // 优先正文；正文为空再退回思考内容（总比什么都没有强）
+    const content = msg ? pick(msg.content) : '';
+    if (content.trim()) return content;
+    const fallback = pick(msg && msg.reasoning_content)
+        || pick(choice && choice.text)
+        || pick(data && data.output_text)
+        || pick(data && data.content);
+    return fallback || '';
+}
+
 // 取消/超时必须带上 name='AbortError'：调用方（AI 写作的「停止并保存已写部分」）
 // 就是靠 err.name 判断该不该保留已生成的部分。只 new Error('已取消') 会被当成
 // 普通失败，用户点了停止反而一个字都不保存。
@@ -674,7 +716,7 @@ const ai = {
                 if (!data || data === '[DONE]') return;
                 try {
                     const parsed = JSON.parse(data);
-                    const content = parsed.choices?.[0]?.delta?.content || '';
+                    const content = extractDeltaContent(parsed);
                     if (content) {
                         fullContent += content;
                         onStream(content, fullContent);
@@ -712,7 +754,7 @@ const ai = {
             }
         } else {
             const data = await response.json();
-            return data.choices?.[0]?.message?.content || '';
+            return extractMessageContent(data);
         }
     },
 
