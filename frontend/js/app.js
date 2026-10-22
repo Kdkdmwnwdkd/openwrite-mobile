@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.19.3',   // 与 package.json 保持一致
+    VERSION: '2.19.4',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -3125,18 +3125,23 @@ async function renderNovelDetail(container, novelId) {
 
             <!-- 目录树形结构 -->
             <div class="novel-tree">
-                <!-- 大纲 -->
-                <div class="tree-folder" onclick="toggleTreeFolder(this)">
+                <!-- 大纲：空的时候只占一行，点击直接进编辑器 —— 折叠一个空区没有任何意义 -->
+                ${outlineItems.length === 0 ? `
+                <div class="tree-folder is-empty" onclick="navigateTo('outlineEditor', { novelId: '${novelId}' })">
                     <div class="tree-folder-header">
+                        <span class="tree-label">大纲</span>
+                        <span class="tree-count">暂无，点击添加</span>
+                    </div>
+                </div>` : `
+                <div class="tree-folder">
+                    <div class="tree-folder-header" onclick="toggleTreeFolder(this.parentElement)">
                         <span class="tree-toggle">▼</span>
                         <span class="tree-icon">📋</span>
                         <span class="tree-label">大纲</span>
                         <span class="tree-count">${outlineItems.length}项</span>
                     </div>
                     <div class="tree-folder-content">
-                        ${outlineItems.length === 0 
-                            ? '<div class="tree-empty">暂无大纲</div>'
-                            : outlineItems.map((item, idx) => `
+                        ${outlineItems.map((item, idx) => `
                                 <div class="tree-file" onclick="event.stopPropagation(); viewOutlineItem('${novelId}', ${idx})">
                                     <span class="tree-file-icon">📄</span>
                                     <span class="tree-file-name">第${item.chapter}章 ${escapeHtml(item.title || '')}</span>
@@ -3144,20 +3149,25 @@ async function renderNovelDetail(container, novelId) {
                                 </div>
                             `).join('')}
                     </div>
-                </div>
+                </div>`}
 
-                <!-- 资料 -->
-                <div class="tree-folder" onclick="toggleTreeFolder(this)">
+                <!-- 资料：空时同样只占一行 -->
+                ${characters.length === 0 ? `
+                <div class="tree-folder is-empty" onclick="navigateTo('characterCards', { novelId: '${novelId}' })">
                     <div class="tree-folder-header">
+                        <span class="tree-label">资料</span>
+                        <span class="tree-count">暂无角色，点击添加</span>
+                    </div>
+                </div>` : `
+                <div class="tree-folder">
+                    <div class="tree-folder-header" onclick="toggleTreeFolder(this.parentElement)">
                         <span class="tree-toggle">▼</span>
                         <span class="tree-icon">📁</span>
                         <span class="tree-label">资料</span>
                         <span class="tree-count">${characters.length}项</span>
                     </div>
                     <div class="tree-folder-content">
-                        ${characters.length === 0
-                            ? '<div class="tree-empty">暂无资料</div>'
-                            : characters.map((char, idx) => `
+                        ${characters.map((char, idx) => `
                                 <div class="tree-file" onclick="event.stopPropagation(); viewCharacter('${novelId}', ${idx})">
                                     <span class="tree-file-icon">👤</span>
                                     <span class="tree-file-name">${escapeHtml(char.name || '')}</span>
@@ -3165,7 +3175,7 @@ async function renderNovelDetail(container, novelId) {
                                 </div>
                             `).join('')}
                     </div>
-                </div>
+                </div>`}
 
                 <!-- 章节/正文 -->
                 <div class="tree-folder expanded" onclick="toggleTreeFolder(this)">
@@ -3862,27 +3872,43 @@ async function renderChapterEdit(container, novelId, chapterNum) {
                 <button class="btn btn-outline btn-sm" onclick="saveSceneCard('${novelId}', ${chapterNum})">保存场景卡</button>
             </div>
         </div>
-        <div class="action-buttons-row" style="margin-top: 12px;">
-            <button class="btn btn-secondary" onclick="checkChapterLocal('${novelId}', ${chapterNum})">📋 体检</button>
-            <button class="btn btn-secondary" onclick="reviewThisChapter('${novelId}', ${chapterNum})">🔍 AI审稿</button>
-            <button class="btn btn-secondary" onclick="extractChapterSettings('${novelId}', ${chapterNum})">📥 提取设定</button>
-            <button class="btn btn-primary" onclick="aiContinueChapter('${novelId}', ${chapterNum})">✨ AI续写本章</button>
-        </div>
-        <div class="action-buttons-row" style="margin-top: 8px;">
-            <button class="btn btn-outline" onclick="navigateTo('beatControl', { novelId: '${novelId}', chapterNum: ${chapterNum} })">🎬 节拍控制</button>
-            <button class="btn btn-outline" onclick="navigateTo('paragraphEdit', { novelId: '${novelId}', chapterNum: ${chapterNum} })">📄 分段编辑</button>
-            <button class="btn btn-outline" onclick="aiReaderSimulate('${novelId}', ${chapterNum})">🎭 AI读者</button>
-        </div>
-        <div class="action-buttons-row" style="margin-top: 8px;">
-            <button class="btn btn-outline" onclick="generateChapterSummary('${novelId}', ${chapterNum})">📝 生成摘要</button>
-            <button class="btn btn-outline" onclick="showChapterHistory('${novelId}', ${chapterNum})">🕘 历史版本</button>
-            <button class="btn btn-outline" onclick="showResearchSheet('${novelId}')">🔎 查资料</button>
-            <button class="btn btn-outline" onclick="navigateTo('listen', { novelId: '${novelId}', chapterNum: ${chapterNum} })">🎧 听稿</button>
-            <button class="btn btn-outline" onclick="checkChapterHook('${novelId}', ${chapterNum})">🪝 章末钩子</button>
+        <!-- 底部工具：一个主操作 + 一行常用工具 + 「更多」抽屉。
+             原来是 3 行 12 个同等权重的按钮，占掉近三分之一屏，正文被挤到上面。 -->
+        <div class="editor-actions">
+            <button class="btn btn-primary editor-primary" onclick="aiContinueChapter('${novelId}', ${chapterNum})">AI 续写本章</button>
+            <div class="editor-chips">
+                <button class="editor-chip" onclick="checkChapterLocal('${novelId}', ${chapterNum})">体检</button>
+                <button class="editor-chip" onclick="reviewThisChapter('${novelId}', ${chapterNum})">审稿</button>
+                <button class="editor-chip" onclick="extractChapterSettings('${novelId}', ${chapterNum})">提取设定</button>
+                <button class="editor-chip" onclick="showEditorTools('${novelId}', ${chapterNum})">更多工具</button>
+            </div>
         </div>
     `;
 
     bindEditorAutosave(novelId, chapterNum);
+}
+
+// 编辑器「更多工具」抽屉。低频操作收进来，底部只留常用四件，
+// 免得标题、正文之外还堆着两行按钮跟正文抢注意力。
+function showEditorTools(novelId, chapterNum) {
+    const tools = [
+        { icon: '🎬', name: '节拍控制', desc: '按节拍推进本章', act: `navigateTo('beatControl', { novelId: '${novelId}', chapterNum: ${chapterNum} })` },
+        { icon: '📄', name: '分段编辑', desc: '逐段改写与调序', act: `navigateTo('paragraphEdit', { novelId: '${novelId}', chapterNum: ${chapterNum} })` },
+        { icon: '🎭', name: 'AI 读者', desc: '模拟读者反馈', act: `aiReaderSimulate('${novelId}', ${chapterNum})` },
+        { icon: '📝', name: '生成摘要', desc: '给后续章节当上下文', act: `generateChapterSummary('${novelId}', ${chapterNum})` },
+        { icon: '🕘', name: '历史版本', desc: '回滚到旧稿', act: `showChapterHistory('${novelId}', ${chapterNum})` },
+        { icon: '🔎', name: '查资料', desc: '联网检索并沉淀', act: `showResearchSheet('${novelId}')` },
+        { icon: '🎧', name: '听稿校对', desc: 'TTS 逐句朗读', act: `navigateTo('listen', { novelId: '${novelId}', chapterNum: ${chapterNum} })` },
+        { icon: '🪝', name: '章末钩子', desc: '检查结尾留人能力', act: `checkChapterHook('${novelId}', ${chapterNum})` }
+    ];
+    const body = `<div class="tool-grid">
+        ${tools.map(t => `
+            <button class="tool-cell" onclick="closeModal(); ${t.act}">
+                <span class="tool-name">${t.name}</span>
+                <span class="tool-desc">${t.desc}</span>
+            </button>`).join('')}
+    </div>`;
+    createModal('更多工具', body).show();
 }
 
 // ===== 编辑器自动保存 =====
@@ -4187,7 +4213,7 @@ async function renderSettings(container) {
 
     container.innerHTML = `
         <div class="settings-group">
-            <div class="settings-group-title">AI 提供商</div>
+            <div class="settings-group-title">模型与技能</div>
                 <div class="settings-item" onclick="showModelConfigModal()">
                 <div class="settings-item-left">
                     <div class="settings-icon"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M6 8h.01M10 8h.01M14 8h.01M18 8h.01"/></svg></div>
@@ -4228,6 +4254,10 @@ async function renderSettings(container) {
                 </div>
                 <span class="settings-arrow">›</span>
             </div>
+        </div>
+
+        <div class="settings-group">
+            <div class="settings-group-title">写作辅助</div>
             <div class="settings-item" onclick="navigateTo('research')">
                 <div class="settings-item-left">
                     <div class="settings-icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></div>
@@ -4238,22 +4268,26 @@ async function renderSettings(container) {
                 </div>
                 <span class="settings-arrow">›</span>
             </div>
-            <div class="settings-item" onclick="navigateTo('sync')">
-                <div class="settings-item-left">
-                    <div class="settings-icon"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-9 9M3 12a9 9 0 0 1 9-9"/><path d="M3 12a9 9 0 0 0 9 9"/><path d="M12 3v18"/><path d="M8 7l4-4 4 4M8 17l4 4 4-4"/></svg></div>
-                    <div>
-                        <div class="settings-label">多设备同步</div>
-                        <div class="settings-value">WebDAV 快照同步，换机不丢稿</div>
-                    </div>
-                </div>
-                <span class="settings-arrow">›</span>
-            </div>
             <div class="settings-item" onclick="showDailyGoalSetting()">
                 <div class="settings-item-left">
                     <div class="settings-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
                     <div>
                         <div class="settings-label">每日写作目标</div>
                         <div class="settings-value">给自己一个每天的字数</div>
+                    </div>
+                </div>
+                <span class="settings-arrow">›</span>
+            </div>
+        </div>
+
+        <div class="settings-group">
+            <div class="settings-group-title">数据</div>
+            <div class="settings-item" onclick="navigateTo('sync')">
+                <div class="settings-item-left">
+                    <div class="settings-icon"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-9 9M3 12a9 9 0 0 1 9-9"/><path d="M3 12a9 9 0 0 0 9 9"/><path d="M12 3v18"/><path d="M8 7l4-4 4 4M8 17l4 4 4-4"/></svg></div>
+                    <div>
+                        <div class="settings-label">多设备同步</div>
+                        <div class="settings-value">WebDAV 快照同步，换机不丢稿</div>
                     </div>
                 </div>
                 <span class="settings-arrow">›</span>
