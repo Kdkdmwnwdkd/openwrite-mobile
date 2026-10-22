@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.26.1',   // 与 package.json 保持一致
+    VERSION: '2.26.2',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1071,6 +1071,76 @@ function parseJsonLoose(text, opener = '{', closer = '}', validate = null) {
         if (out !== undefined && ok(out)) return out;
         pos = end + 1;
     }
+}
+
+// 输出被 max_tokens 截断时，JSON 尾部是残缺的（"desc":"夜班出租车司机，缺钱，）。
+// 直接 JSON.parse 必然失败，用户看到的是"格式不对"这种毫无信息量的提示。
+// 这里把残缺的结构补齐：从后往前试几个裁剪点，每个点都补齐括号再解析，
+// 取第一个能解析成功的。代价是被截断的那部分内容是真的丢了，不能凭空补。
+function repairTruncatedJson(text) {
+    const body = String(text || '');
+    const start = body.indexOf('{');
+    if (start === -1) return null;
+    const s = body.slice(start);
+
+    // 候选裁剪点：每个完整字符串的结束位置、每个逗号之后
+    const cuts = [];
+    let inStr = false, esc = false;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inStr) {
+            if (esc) { esc = false; continue; }
+            if (ch === '\\') { esc = true; continue; }
+            if (ch === '"') { inStr = false; cuts.push(i + 1); }
+            continue;
+        }
+        if (ch === '"') { inStr = true; continue; }
+        if (ch === ',') cuts.push(i + 1);
+    }
+
+    // 从后往前试。截断通常只影响最后一两个元素，试几十个点足够。
+    const tryCuts = cuts.slice(-60).reverse();
+    tryCuts.push(s.length);
+
+    for (const t of tryCuts) {
+        let out = s.slice(0, t).replace(/[,:\s]+$/, '');
+        if (!out || out === '{') continue;
+
+        // 重新扫一遍，算出还缺哪些括号
+        const stack = [];
+        let is = false, es = false;
+        for (let i = 0; i < out.length; i++) {
+            const ch = out[i];
+            if (is) {
+                if (es) { es = false; continue; }
+                if (ch === '\\') { es = true; continue; }
+                if (ch === '"') is = false;
+                continue;
+            }
+            if (ch === '"') { is = true; continue; }
+            if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+            else if (ch === '}' || ch === ']') stack.pop();
+        }
+        if (is) continue;              // 还有没闭合的字符串，这个裁剪点不行
+        if (!stack.length) continue;   // 结构本来就完整，不是截断问题
+
+        for (let i = stack.length - 1; i >= 0; i--) out += stack[i];
+        try { return JSON.parse(out); } catch (_) { /* 试下一个点 */ }
+    }
+    return null;
+}
+
+function parseJsonLooseWithRepair(text, opener = '{', closer = '}', validate = null) {
+    const direct = parseJsonLoose(text, opener, closer, validate);
+    if (direct) return direct;
+    // 截断修复只对对象/数组有意义
+    if (opener !== '{' && opener !== '[') return null;
+    const repaired = repairTruncatedJson(text);
+    if (!repaired) return null;
+    if (validate && typeof validate === 'function') {
+        try { return validate(repaired) ? repaired : null; } catch (_) { return null; }
+    }
+    return repaired;
 }
 
 // 解析审稿输出；解析失败返回 null，由调用方回退成纯文本展示。
@@ -4904,20 +4974,49 @@ async function guideGenerate() {
 }`;
 
     let plan = null;
+    let lastErr = null;
+    let raw = '';
     try {
-        const raw = await ai.chat([
+        raw = await ai.chat([
             { role: 'system', content: '你是网文策划编辑。产出会直接变成写作骨架，每一条都要具体到能写。' },
             { role: 'user', content: prompt }
-        ], null, 4000);
-        plan = parseJsonLoose(raw, '{', '}', (v) =>
+        ], null, 6000);
+        plan = parseJsonLooseWithRepair(raw, '{', '}', (v) =>
             v && typeof v === 'object' && !Array.isArray(v) && 'outline' in v);
     } catch (e) {
-        plan = null;
+        // 原来这里 catch 之后直接 plan = null，真实原因（401 / 429 / 超时 / Key 没配）
+        // 全被吞掉，用户只能看到"可能是网络问题"这种废话，还没法自己判断该不该重试。
+        lastErr = e;
+    }
+
+    if (!plan || !Array.isArray(plan.outline) || !plan.outline.length) {
+        // 兜底再试一次：输出被 max_tokens 截断时，修复能救回一部分，
+        // 实在救不回就用更省 token 的要求重试一次（小模型尤其需要）。
+        if (!lastErr) {
+            guideSetBusy('格式没对上，重试中…');
+            try {
+                const shortPrompt = prompt + '\n\n注意：上次输出超长被截断了。这次请精简：'
+                    + 'outline 只写 8 章，每章 summary 一句话；characters 3 个；worldbuilding 一句话；'
+                    + 'synopsis 一句话；highlights 4 条；opening 80 字以内。仍然只输出 JSON。';
+                raw = await ai.chat([
+                    { role: 'system', content: '你是网文策划编辑。产出会直接变成写作骨架，每一条都要具体到能写。' },
+                    { role: 'user', content: shortPrompt }
+                ], null, 6000);
+                plan = parseJsonLooseWithRepair(raw, '{', '}', (v) =>
+                    v && typeof v === 'object' && !Array.isArray(v) && 'outline' in v);
+            } catch (e2) {
+                lastErr = e2;
+            }
+        }
     }
 
     if (!plan || !Array.isArray(plan.outline) || !plan.outline.length) {
         guideSetBusy('');
-        addChatMessage('ai', '大纲没生成出来（可能是网络问题，或模型返回的格式不对）。', []);
+        // 把真实原因说出来，用户才知道该换模型、改 Key 还是重试
+        const reason = lastErr
+            ? lastErr.message
+            : (raw ? '模型返回的内容不是预期格式（可能是输出超长被截断）' : '模型没有返回内容');
+        addChatMessage('ai', '大纲没生成出来：' + reason, []);
         const box = document.getElementById('chat-messages');
         if (box) {
             const d = document.createElement('div');
@@ -5422,7 +5521,7 @@ async function guideReplanGenerate() {
             { role: 'system', content: '你是网文策划编辑，产出要具体到能直接开写。' },
             { role: 'user', content: prompt }
         ], null, 4000);
-        plan = parseJsonLoose(raw, '{', '}', (v) =>
+        plan = parseJsonLooseWithRepair(raw, '{', '}', (v) =>
             v && typeof v === 'object' && !Array.isArray(v) && 'outline' in v);
     } catch (_) { plan = null; }
 
@@ -6060,7 +6159,7 @@ const EXTRACT_WB_LABEL = {
 
 function parseExtraction(text) {
     // 校验必须看到抽取结果的标志字段，否则可能咬到正文里的示例 JSON
-    const o = parseJsonLoose(text, '{', '}', (v) =>
+    const o = parseJsonLooseWithRepair(text, '{', '}', (v) =>
         v && typeof v === 'object' && !Array.isArray(v) &&
         ('summary' in v || 'characters' in v || 'world' in v || 'foreshadow' in v || 'conflicts' in v));
     if (!o) return null;
