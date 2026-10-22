@@ -4964,3 +4964,62 @@ body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary
     width: 5px; height: 5px; border-radius: 50%;
     background: #fff; opacity: .9;
 }
+
+/* ===== AI 审稿：结构化问题清单 ===== */
+/* 每条带原文引用与段落号，用户能直接回编辑器定位。左侧色条表示严重度。 */
+.review-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 62vh;
+    overflow-y: auto;
+}
+.review-item {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    background: var(--surface);
+}
+.review-item.sev-s1 { border-left-color: #dc2626; }
+.review-item.sev-s2 { border-left-color: #ea580c; }
+.review-item.sev-s3 { border-left-color: #2563eb; }
+.review-item.sev-s4 { border-left-color: var(--text-tertiary); }
+.review-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+.review-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg);
+}
+.sev-s1 .review-badge { color: #dc2626; }
+.sev-s2 .review-badge { color: #ea580c; }
+.sev-s3 .review-badge { color: #2563eb; }
+.sev-s4 .review-badge { color: var(--text-secondary); }
+.review-cat,
+.review-loc {
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+.review-loc { margin-left: auto; }
+.review-quote {
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: var(--bg);
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    line-height: 1.5;
+}
+.review-issue { font-size: 13px; line-height: 1.6; }
+.review-fix { font-size: 13px; line-height: 1.6; color: var(--text-secondary); margin-top: 4px; }
+.review-empty { padding: 28px 16px; text-align: center; font-size: 14px; }
+.review-empty-sub { font-size: 12px; color: var(--text-tertiary); }
+.review-raw { white-space: pre-wrap; font-size: 14px; line-height: 1.6; max-height: 60vh; overflow-y: auto; }

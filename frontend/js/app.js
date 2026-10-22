@@ -401,7 +401,15 @@ async function buildLayeredContext(novelId, chapterNum, hintText = '') {
     // 3) 伏笔债务：优先提醒已逾期的
     try {
         const fsList = await novelManager.listForeshadowing(novelId);
-        const pending = fsList.filter(f => f.status !== 'harvested');
+        // 只列「已到期」的伏笔当债务。未到期的一律不在这里催 ——
+        // 一边说"本章应回收"、一边在禁区里说"不得提前揭晓"，模型会两头为难，
+        // 最后往往是"含糊提一句"这种最差解。
+        // 只认明确处于「已埋设」状态的。旧数据里出现过别的状态值（如 revealed），
+        // 按「非 harvested 即未回收」处理会把它当成欠账，天天催一件早就讲完的事。
+        const pending = fsList.filter(f =>
+            (f.status || 'planted') === 'planted' &&
+            (Number(f.targetChapter) || 1) <= chapterNum
+        );
         if (pending.length) {
             const scored = pending.map(f => ({
                 ...f,
@@ -689,10 +697,30 @@ ${wbContext ? '\n以下为世界观设定（写作时必须严格遵守规则）
         ]);
     },
 
+    // 本章禁区。只从「尚未回收、且计划更晚揭晓」的伏笔里取 —— 这是模型最容易写崩的地方：
+    // 为了推进剧情，它会顺手把后面几章才该翻的底牌提前翻出来。
+    // 没有这类数据时不硬编，宁可留空也不要写一堆"注意保持文风"的空话。
+    async buildForbiddenZones(novelId, chapterNum) {
+        const out = [];
+        try {
+            const fs = await novelManager.listForeshadowing(novelId);
+            for (const f of (fs || [])) {
+                if (!f || (f.status || 'planted') !== 'planted') continue;
+                const target = Number(f.targetChapter) || 0;
+                if (target > chapterNum && f.description) {
+                    out.push(`伏笔「${String(f.description).slice(0, 40)}」计划第 ${target} 章才揭晓，本章不得点破、不得给出答案`);
+                }
+                if (out.length >= 5) break;
+            }
+        } catch (_) { /* 读不到就不加禁区，不影响写作 */ }
+        return out;
+    },
+
     async continueChapter(novelInfo, previousChapters, chapterNum, prompt, onStream = null, signal = null) {
         // v2.8.0：改用分层上下文（上一章全文 + 旧章摘要 + 按命中注入的设定 + 伏笔债务）
         // 旧实现把每一章都截取前 500 字拼进去，长篇时既丢失衔接又浪费 token。
         const layered = await buildLayeredContext(novelInfo.id, chapterNum, prompt || '');
+        const forbidden = await this.buildForbiddenZones(novelInfo.id, chapterNum);
 
         const userPrompt = `请为小说《${novelInfo.title}》生成第${chapterNum}章。
 
@@ -700,8 +728,7 @@ ${wbContext ? '\n以下为世界观设定（写作时必须严格遵守规则）
 简介：${novelInfo.description || '暂无'}
 
 ${layered.text ? '===== 故事上下文（必须遵守，不得出现与之一致性冲突的内容）=====\n' + layered.text + '\n===== 上下文结束 =====\n' : ''}
-
-写作要求：
+${forbidden.length ? '===== 本章禁止（违反即视为不合格）=====\n' + forbidden.map(z => '- ' + z).join('\n') + '\n\n' : ''}写作要求：
 ${prompt || '延续上一章结尾的情节，保持人物性格与文风一致，推进主线并有记忆点'}
 
 输出要求：
@@ -857,33 +884,85 @@ ${list}
         return parseHookJson(text, items);
     },
 
+    // 审稿：返回结构化问题清单，而不是「打个分 + 一段点评」。
+    // 打分最容易变成空话（"文笔流畅，建议加强细节"），改成一个可执行的约定：
+    // 每条问题必须带原文引用（quote），能定位到具体段落，否则模型写不出东西来。
     async reviewChapter(chapterContent, novelInfo, chapterNum) {
         const charContext = chapterNum ? await buildCharacterContext(novelInfo.id, chapterNum) : '';
         const wbContext = chapterNum ? await buildWorldbuildingContext(novelInfo.id) : '';
-        const prompt = `请对以下小说章节进行专业审稿：
+        const prompt = `请审这部小说的第${chapterNum || 1}章。
 
 小说：${novelInfo.title}
-${charContext ? '\n角色设定（用于校验角色是否OOC）：\n' + charContext + '\n' : ''}
-${wbContext ? '\n世界观设定（用于校验是否违反规则）：\n' + wbContext + '\n' : ''}
-章节内容：
+${charContext ? '\n角色设定（用于判断是否 OOC）：\n' + charContext + '\n' : ''}
+${wbContext ? '\n世界观设定（用于判断是否违反规则）：\n' + wbContext + '\n' : ''}
+【正文】
 ${chapterContent}
+【正文结束】
 
-请从以下维度进行评价（每项满分10分）：
-1. 情节连贯性
-2. 人物塑造（是否与角色设定一致）
-3. 文笔流畅度
-4. 场景描写
-5. 对话质量
-${wbContext ? '6. 设定一致性（是否违反世界观规则）' : ''}
+【你的任务】
+找出问题，不是验证正确性。没发现问题时才输出空数组，不要为了凑数硬编。
 
-给出具体分数和修改建议。`;
+【硬性要求】
+1. 每条必须给 quote：从正文里**原样复制** 10-50 字，能定位到出问题的那一句。复制不出来说明你没读到具体问题，不要写这条。
+2. 一致性问题（category 为 consistency / factual / causal）的 fix 只写"事实应该怎么统一"，不要夹带文学创作建议。
+3. 禁止输出这类话：文笔流畅、建议加强细节描写、人物形象鲜明、整体不错。
 
-        return await this.chat([
-            { role: 'system', content: '你是一位资深小说编辑，擅长审稿和给出建设性意见。' },
+【分级】命中即定级，不要整体打分
+- S1：读者会当场出戏／设定硬冲突／逻辑断裂（例如死者复生、时间线倒错）
+- S2：明显影响阅读（节奏拖沓、人物行为没有动机、对话像说明书）
+- S3：局部可优化（用词重复、场景描写单薄、过渡生硬）
+- S4：可选建议
+
+【输出格式】只输出 JSON 数组，前后不要任何解释文字、不要 markdown 代码块：
+[{"severity":"S2","category":"character","quote":"原文片段","issue":"问题是什么","fix":"具体怎么改"}]
+
+category 只能取：structure | character | prose | consistency | factual | causal
+最多 8 条，按 S1→S4 排序。没问题输出 []。`;
+
+        const raw = await this.chat([
+            { role: 'system', content: '你是严格的审稿编辑。你的产出是可执行的修改清单，不是评价。' },
             { role: 'user', content: prompt }
-        ]);
+        ], null, 2500);
+        return { raw, findings: parseReviewFindings(raw) };
     }
 };
+
+// 解析审稿输出。模型有时会包 ```json 代码块或加一句"以下是结果"，
+// 这里都剥掉；解析失败返回 null，由调用方回退成纯文本展示。
+function parseReviewFindings(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const body = fenced ? fenced[1].trim() : raw;
+    const arrText = body.match(/\[[\s\S]*\]/);
+    if (!arrText) return null;
+    try {
+        const arr = JSON.parse(arrText[0]);
+        if (!Array.isArray(arr)) return null;
+        return arr.filter(x => x && (x.issue || x.quote)).map(x => ({
+            severity: /^S[1-4]$/.test(String(x.severity)) ? String(x.severity) : 'S3',
+            category: String(x.category || 'prose').toLowerCase(),
+            quote: String(x.quote || '').slice(0, 200),
+            issue: String(x.issue || ''),
+            fix: String(x.fix || '')
+        })).sort((a, b) => a.severity.localeCompare(b.severity));
+    } catch (e) {
+        return null;
+    }
+}
+
+// 把 quote 对回正文的段落号，方便用户回编辑器里找。
+// 模型偶尔会改一两个字，所以按前 20 字做包含匹配，容错但不至于错太远。
+function locateQuoteParagraph(content, quote) {
+    if (!content || !quote) return 0;
+    const paras = String(content).split(/\n+/).filter(x => x.trim());
+    const key = String(quote).replace(/\s+/g, '').slice(0, 20);
+    if (!key) return 0;
+    for (let i = 0; i < paras.length; i++) {
+        if (paras[i].replace(/\s+/g, '').includes(key)) return i + 1;
+    }
+    return 0;
+}
 
 // ===== Novel Data Manager =====
 const novelManager = {
@@ -4799,6 +4878,33 @@ async function saveAndBack(novelId, chapterNum) {
     }
 }
 
+const SEVERITY_LABEL = { S1: '致命', S2: '严重', S3: '一般', S4: '建议' };
+const REVIEW_CATEGORY_LABEL = {
+    structure: '结构', character: '人物', prose: '文笔',
+    consistency: '一致性', factual: '事实', causal: '因果'
+};
+
+// 渲染结构化审稿结果。每条都带原文引用与段落号 —— 不给"具体哪里"的建议，
+// 用户没法改；能给到段，才谈得上可执行。
+function renderReviewFindings(findings, content) {
+    if (!findings.length) {
+        return `<div class="review-empty">没发现明显问题。<br><span class="review-empty-sub">可以换个角度再跑一次，或直接往下写。</span></div>`;
+    }
+    return `<div class="review-list">` + findings.map(f => {
+        const para = locateQuoteParagraph(content, f.quote);
+        return `<div class="review-item sev-${f.severity.toLowerCase()}">
+            <div class="review-head">
+                <span class="review-badge">${f.severity} ${SEVERITY_LABEL[f.severity] || ''}</span>
+                <span class="review-cat">${REVIEW_CATEGORY_LABEL[f.category] || escapeHtml(f.category)}</span>
+                ${para ? `<span class="review-loc">第 ${para} 段</span>` : ''}
+            </div>
+            ${f.quote ? `<div class="review-quote">「${escapeHtml(f.quote)}」</div>` : ''}
+            <div class="review-issue">${escapeHtml(f.issue)}</div>
+            ${f.fix ? `<div class="review-fix">改法：${escapeHtml(f.fix)}</div>` : ''}
+        </div>`;
+    }).join('') + `</div>`;
+}
+
 async function reviewThisChapter(novelId, chapterNum) {
     try {
         const novel = await novelManager.get(novelId);
@@ -4806,10 +4912,14 @@ async function reviewThisChapter(novelId, chapterNum) {
         if (!chapter) { ui.showToast('章节不存在'); return; }
 
         ui.showToast('AI 正在审稿...');
-        const review = await ai.reviewChapter(chapter.content, novel);
+        const review = await ai.reviewChapter(chapter.content, novel, chapterNum);
 
-        const modal = createModal('AI 审稿结果', `<div style="white-space: pre-wrap; font-size: 14px; line-height: 1.6; max-height: 60vh; overflow-y: auto;">${review}</div>`);
-        modal.show();
+        // findings 为 null = 模型没按约定吐 JSON。这时原样展示，别把内容吞掉。
+        const body = review.findings
+            ? renderReviewFindings(review.findings, chapter.content)
+            : `<div class="review-raw">${escapeHtml(review.raw || '')}</div>`;
+
+        createModal(`AI 审稿 · 第${chapterNum}章`, body).show();
     } catch (err) {
         ui.showToast('审稿失败: ' + err.message);
     }
