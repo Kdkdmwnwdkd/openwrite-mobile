@@ -924,6 +924,54 @@ category 只能取：structure | character | prose | consistency | factual | cau
             { role: 'user', content: prompt }
         ], null, 2500);
         return { raw, findings: parseReviewFindings(raw) };
+    },
+
+    // 从一章正文里抽取「可结构化的设定」，供写回角色卡 / 世界观 / 伏笔。
+    // 关键约束：只提取正文明确写到的，允许输出空数组。模型最擅长的就是"合理补全"，
+    // 而设定库里多一条编造的内容，比少一条危害大得多 —— 后面每一章都会带着它写。
+    async extractChapterFacts(novel, chapter, chapterNum) {
+        const [chars, wbs] = await Promise.all([
+            novelManager.listCharacters(novel.id).catch(() => []),
+            novelManager.listWorldbuilding(novel.id).catch(() => [])
+        ]);
+        const charNames = (chars || []).map(c => c.name).filter(Boolean).slice(0, 30).join('、') || '（暂无）';
+        const wbTitles = (wbs || []).map(w => w.title).filter(Boolean).slice(0, 30).join('、') || '（暂无）';
+
+        const prompt = `从下面这一章正文里提取「可以写回作者资料库」的结构化设定。
+
+小说：${novel.title}
+【现有角色】${charNames}
+【现有世界观】${wbTitles}
+
+【第${chapterNum}章 正文】
+${chapter.content}
+【正文结束】
+
+【输出格式】只输出 JSON，不要解释文字、不要 markdown 代码块：
+{
+  "summary": "本章 80-120 字摘要，供后续章节当上下文用",
+  "characters": [{"name": "角色名", "status": "本章结束时的处境或状态变化，一句话", "confidence": 0.9}],
+  "world": [{"title": "设定名", "category": "map|faction|timeline|rule|research|other", "content": "一句话说明", "confidence": 0.8}],
+  "foreshadow": [{"description": "本章埋下的伏笔，一句话", "targetChapter": 8, "confidence": 0.8}],
+  "harvested": ["本章回收或揭晓了哪个已埋伏笔（写描述里的关键词）"],
+  "conflicts": [{"with": "与哪条已有设定冲突", "evidence": "正文里的原句", "confidence": 0.8}]
+}
+
+【硬性规则】
+1. 只提取正文里明确写到的。没写的不许推测、不许补全，宁可少。
+2. 角色只记「状态变化」：受伤、得到物品、位置变化、关系变化、身份暴露。
+   性格、外貌、背景这些如果正文没新增信息，不要重复抄一遍。
+3. world 只记新出现且值得长期记住的：地名、组织、规则、历史事件。
+   同一个概念已在【现有世界观】里就别再提。
+4. foreshadow 只记「作者有意埋下、后面要回收」的线索。普通的悬念不算。
+5. confidence 按证据强度给：正文明确写出 0.9；需要跨段推断 0.6；拿不准 0.3。
+6. 没有内容的字段输出空数组 []，不要为了凑数编造。`;
+
+        const raw = await this.chat([
+            { role: 'system', content: '你是资料整理员。你只提取正文里已经写明的信息，拒绝推测和补全。' },
+            { role: 'user', content: prompt }
+        ], null, 3000);
+        return { raw, data: parseExtraction(raw) };
     }
 };
 
@@ -3714,6 +3762,7 @@ async function renderChapterEdit(container, novelId, chapterNum) {
         </div>
         <div class="action-buttons-row" style="margin-top: 12px;">
             <button class="btn btn-secondary" onclick="reviewThisChapter('${novelId}', ${chapterNum})">🔍 AI审稿</button>
+            <button class="btn btn-secondary" onclick="extractChapterSettings('${novelId}', ${chapterNum})">📥 提取设定</button>
             <button class="btn btn-primary" onclick="aiContinueChapter('${novelId}', ${chapterNum})">✨ AI续写本章</button>
         </div>
         <div class="action-buttons-row" style="margin-top: 8px;">
@@ -4922,6 +4971,202 @@ async function reviewThisChapter(novelId, chapterNum) {
         createModal(`AI 审稿 · 第${chapterNum}章`, body).show();
     } catch (err) {
         ui.showToast('审稿失败: ' + err.message);
+    }
+}
+
+// ===== 章节设定抽取 → 人工确认 → 写回 =====
+// 为什么一定要人工确认：设定库里混进一条编造的内容，后面每一章都会带着它写，
+// 而且越滚越像真的。宁可多点一次，也不自动写。
+
+const EXTRACT_WB_LABEL = {
+    map: '地图与地理', faction: '势力与组织', timeline: '时间线与历史',
+    rule: '规则与法则', research: '参考资料', other: '其他设定'
+};
+
+function parseExtraction(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const body = fenced ? fenced[1].trim() : raw;
+    const objText = body.match(/\{[\s\S]*\}/);
+    if (!objText) return null;
+    try {
+        const o = JSON.parse(objText[0]);
+        const arr = (v) => Array.isArray(v) ? v : [];
+        const conf = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0.5;
+        };
+        const CATS = ['map', 'faction', 'timeline', 'rule', 'research', 'other'];
+        return {
+            summary: String(o.summary || '').trim(),
+            characters: arr(o.characters)
+                .filter(x => x && x.name && x.status)
+                .map(x => ({ name: String(x.name).trim(), status: String(x.status).trim(), confidence: conf(x.confidence) })),
+            world: arr(o.world)
+                .filter(x => x && x.title)
+                .map(x => ({
+                    title: String(x.title).trim(),
+                    category: CATS.includes(String(x.category)) ? String(x.category) : 'other',
+                    content: String(x.content || '').trim(),
+                    confidence: conf(x.confidence)
+                })),
+            foreshadow: arr(o.foreshadow)
+                .filter(x => x && x.description)
+                .map(x => ({
+                    description: String(x.description).trim(),
+                    targetChapter: Math.max(1, Number(x.targetChapter) || 0),
+                    confidence: conf(x.confidence)
+                })),
+            harvested: arr(o.harvested).map(x => String(x || '').trim()).filter(Boolean),
+            conflicts: arr(o.conflicts)
+                .filter(x => x && x.with)
+                .map(x => ({ with: String(x.with).trim(), evidence: String(x.evidence || '').trim(), confidence: conf(x.confidence) }))
+        };
+    } catch (e) {
+        return null;
+    }
+}
+
+async function extractChapterSettings(novelId, chapterNum) {
+    try {
+        const novel = await novelManager.get(novelId);
+        const chapter = await novelManager.getChapter(novelId, chapterNum);
+        if (!chapter || !chapter.content) { ui.showToast('本章还没有正文'); return; }
+
+        ui.showToast('AI 正在提取设定...', 3000);
+        const r = await ai.extractChapterFacts(novel, chapter, chapterNum);
+        if (!r.data) {
+            createModal('提取失败', `<div class="review-raw">${escapeHtml(r.raw || '模型没有返回可解析的内容')}</div>`).show();
+            return;
+        }
+        // 留一份，关掉弹窗还能再打开（重新提取要再花一次钱）
+        try { await settings.set(`extract_${novelId}_${chapterNum}`, r.data); } catch (_) {}
+        renderExtractModal(r.data, novelId, chapterNum);
+    } catch (e) {
+        ui.showToast('提取失败: ' + e.message, 4000);
+    }
+}
+
+function renderExtractModal(data, novelId, chapterNum) {
+    window.__extractData = data;
+    const confTag = (c) => c >= 0.8 ? '' : `<span class="ex-conf low">置信 ${Math.round(c * 100)}%</span>`;
+
+    const group = (key, label, items, render) => {
+        if (!items.length) return '';
+        return `<div class="ex-group"><div class="ex-group-title">${label}（${items.length}）</div>` +
+            items.map((it, i) => `
+                <label class="ex-item">
+                    <input type="checkbox" class="ex-check" data-key="${key}" data-idx="${i}" checked>
+                    <span class="ex-body">${render(it)}${confTag(it.confidence || 0.5)}</span>
+                </label>`).join('') + `</div>`;
+    };
+
+    const total = data.characters.length + data.world.length + data.foreshadow.length;
+    const html = `
+        ${data.summary ? `<div class="ex-group">
+            <div class="ex-group-title">本章摘要（写进章节，供后续章节当上下文）</div>
+            <label class="ex-item"><input type="checkbox" class="ex-check" data-key="summary" checked>
+                <span class="ex-body">${escapeHtml(data.summary)}</span></label>
+        </div>` : ''}
+        ${group('characters', '角色状态', data.characters, c => `<b>${escapeHtml(c.name)}</b>　${escapeHtml(c.status)}`)}
+        ${group('world', '世界观', data.world, w => `<b>${escapeHtml(w.title)}</b><span class="ex-cat">${EXTRACT_WB_LABEL[w.category] || w.category}</span><br>${escapeHtml(w.content)}`)}
+        ${group('foreshadow', '伏笔', data.foreshadow, f => `${escapeHtml(f.description)}${f.targetChapter ? `<span class="ex-cat">计划第 ${f.targetChapter} 章回收</span>` : ''}`)}
+        ${group('harvested', '本章回收的伏笔', data.harvested, h => escapeHtml(h))}
+        ${data.conflicts.length ? `<div class="ex-group ex-conflict">
+            <div class="ex-group-title">与已有设定冲突（仅提示，不会自动改）</div>
+            ${data.conflicts.map(c => `<div class="ex-item ex-static"><span class="ex-body"><b>${escapeHtml(c.with)}</b><br>${escapeHtml(c.evidence)}</span></div>`).join('')}
+        </div>` : ''}
+        ${total === 0 && !data.summary ? '<div class="review-empty">这一章没有可提取的新设定。</div>' : ''}
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeModal()">取消</button>
+            <button class="btn btn-primary" onclick="applyExtraction('${escapeJs(novelId)}', ${chapterNum})">采纳选中项</button>
+        </div>`;
+    createModal(`提取设定 · 第${chapterNum}章`, html).show();
+}
+
+async function applyExtraction(novelId, chapterNum) {
+    const data = window.__extractData;
+    if (!data) { ui.showToast('没有可写入的内容'); return; }
+
+    const picked = { summary: false, characters: [], world: [], foreshadow: [], harvested: [] };
+    document.querySelectorAll('.ex-check').forEach(c => {
+        if (!c.checked) return;
+        const k = c.dataset.key;
+        if (k === 'summary') { picked.summary = true; return; }
+        if (picked[k]) picked[k].push(Number(c.dataset.idx));
+    });
+
+    let applied = 0, skipped = 0;
+    try {
+        // 摘要只在原本为空时写入，不覆盖用户手写的
+        if (picked.summary && data.summary) {
+            const ch = await novelManager.getChapter(novelId, chapterNum);
+            if (ch && !ch.summary) { await novelManager.saveChapterSummary(novelId, chapterNum, data.summary); applied++; }
+            else skipped++;
+        }
+
+        if (picked.characters.length) {
+            const chars = await novelManager.listCharacters(novelId);
+            for (const i of picked.characters) {
+                const it = data.characters[i];
+                const exist = chars.find(c => (c.name || '').trim() === it.name);
+                if (exist) {
+                    const cur = exist.currentStatus || '';
+                    if (cur.includes(it.status)) { skipped++; continue; }
+                    await novelManager.updateCharacter(exist.id, { currentStatus: cur ? `${cur}；${it.status}` : it.status });
+                    applied++;
+                } else {
+                    await novelManager.createCharacter(novelId, { name: it.name, currentStatus: it.status });
+                    applied++;
+                }
+            }
+        }
+
+        if (picked.world.length) {
+            const wbs = await novelManager.listWorldbuilding(novelId);
+            for (const i of picked.world) {
+                const it = data.world[i];
+                if (wbs.some(w => (w.title || '').trim() === it.title)) { skipped++; continue; }
+                await novelManager.createWorldbuilding(novelId, { title: it.title, category: it.category, content: it.content });
+                applied++;
+            }
+        }
+
+        if (picked.foreshadow.length) {
+            const fs = await novelManager.listForeshadowing(novelId);
+            for (const i of picked.foreshadow) {
+                const it = data.foreshadow[i];
+                if (fs.some(f => (f.description || '').trim() === it.description)) { skipped++; continue; }
+                await novelManager.createForeshadowing(novelId, {
+                    description: it.description,
+                    plantChapter: chapterNum,
+                    targetChapter: it.targetChapter || chapterNum + 3,
+                    status: 'planted'
+                });
+                applied++;
+            }
+        }
+
+        // 回收：用关键词去匹配已埋伏笔，匹配不到就跳过（不做模糊创造）
+        if (picked.harvested.length) {
+            const fs = await novelManager.listForeshadowing(novelId);
+            for (const i of picked.harvested) {
+                const key = data.harvested[i];
+                const hit = fs.find(f => (f.status || 'planted') === 'planted' && f.description && f.description.includes(key));
+                if (hit) { await novelManager.updateForeshadowing(hit.id, { status: 'harvested' }); applied++; }
+                else skipped++;
+            }
+        }
+
+        closeModal();
+        ui.showToast(`已写入 ${applied} 条${skipped ? `，跳过 ${skipped} 条（已存在或无匹配）` : ''}`, 4500);
+        if (store.currentPage === 'chapterEdit') {
+            const view = document.getElementById('page-chapterEdit');
+            if (view) renderChapterEdit(view, novelId, chapterNum);
+        }
+    } catch (e) {
+        ui.showToast('写入失败: ' + e.message, 4000);
     }
 }
 

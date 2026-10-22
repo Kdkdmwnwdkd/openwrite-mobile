@@ -5023,3 +5023,34 @@ body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary
 .review-empty { padding: 28px 16px; text-align: center; font-size: 14px; }
 .review-empty-sub { font-size: 12px; color: var(--text-tertiary); }
 .review-raw { white-space: pre-wrap; font-size: 14px; line-height: 1.6; max-height: 60vh; overflow-y: auto; }
+
+/* ===== 设定抽取：确认清单 ===== */
+/* 全部默认勾选但都可取消；低置信度标出来，让人决定要不要信 */
+.ex-group { margin-bottom: 14px; }
+.ex-group-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+.ex-item {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 6px;
+    background: var(--surface);
+    cursor: pointer;
+}
+.ex-item.ex-static { cursor: default; }
+.ex-item input[type="checkbox"] { margin-top: 3px; flex-shrink: 0; }
+.ex-body { font-size: 13px; line-height: 1.6; }
+.ex-cat { font-size: 11px; color: var(--text-tertiary); margin-left: 6px; }
+.ex-conf.low { font-size: 11px; color: #b45309; margin-left: 6px; }
+.ex-conflict .ex-group-title { color: #b45309; }
+.ex-conflict .ex-item {
+    border-color: rgba(245, 158, 11, 0.45);
+    background: rgba(245, 158, 11, 0.08);
+}
