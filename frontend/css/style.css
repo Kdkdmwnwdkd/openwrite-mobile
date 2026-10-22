@@ -5216,3 +5216,240 @@ body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary
 }
 .tool-name { font-size: 14.5px; }
 .tool-desc { font-size: 11.5px; }
+
+/* ============================================================
+   书架 v2.20：书脊配色 + 信息分层
+   原来四本书都是同一个灰底方块 + 首字，摆在一起分不出谁是谁；
+   「数据统计」三张卡片占 110px，给的是写作者用不上的数字。
+   ============================================================ */
+
+/* 统计压成一行小字，放在书单上方 */
+.shelf-meta {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    padding: 0 2px 10px;
+    letter-spacing: .2px;
+    font-variant-numeric: tabular-nums;
+}
+
+.novel-list { gap: 10px; }
+
+.novel-item {
+    padding: 12px 14px 12px 12px;
+    align-items: center;
+    gap: 14px;
+    border-radius: 14px;
+}
+
+/* 书脊：深色块 + 左侧一道更深的压印，像纸书脊 */
+.novel-item .novel-cover {
+    width: 54px;
+    height: 74px;
+    border: 0;
+    border-radius: 5px;
+    background: var(--cv-bg, var(--surface-2));
+    color: var(--cv-fg, #fff);
+    font-size: 23px;
+    box-shadow: inset 4px 0 0 rgba(0, 0, 0, .14), 0 1px 3px rgba(25, 23, 20, .12);
+}
+
+.novel-item .novel-info { display: flex; flex-direction: column; }
+.novel-item .novel-title {
+    font-size: 16.5px;
+    margin-bottom: 5px;
+    letter-spacing: -.01em;
+}
+.novel-item .novel-sub {
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+.novel-item .novel-time {
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+    margin-top: 4px;
+}
+.novel-arrow {
+    margin-left: auto;
+    font-size: 20px;
+    line-height: 1;
+    color: var(--text-tertiary);
+    opacity: .45;
+    padding-left: 4px;
+}
+
+/* 继续写作：整个 App 最该点的东西，用墨底反白标出来 */
+.resume-card {
+    background: var(--ink);
+    border-color: var(--ink);
+    padding: 14px 15px;
+    margin-bottom: 14px;
+    box-shadow: 0 4px 14px rgba(25, 23, 20, .16);
+}
+.resume-card:active { background: #000; }
+.resume-card .resume-cover {
+    width: 48px;
+    height: 60px;
+    background: rgba(244, 241, 234, .14);
+    border-color: rgba(244, 241, 234, .22);
+    color: var(--paper);
+}
+.resume-card .resume-k { color: rgba(244, 241, 234, .62); }
+.resume-card .resume-t { color: var(--paper); }
+.resume-card .resume-m { color: rgba(244, 241, 234, .55); }
+.resume-card .resume-go {
+    border-color: rgba(244, 241, 234, .30);
+    background: rgba(244, 241, 234, .10);
+    color: var(--paper);
+}
+
+/* 空书架 */
+.shelf-empty {
+    padding: 96px 28px 0;
+    text-align: center;
+}
+.shelf-empty-title {
+    font-family: var(--serif);
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    margin-bottom: 9px;
+}
+.shelf-empty-desc {
+    font-size: 13px;
+    line-height: 1.75;
+    color: var(--text-secondary);
+    margin-bottom: 26px;
+}
+.shelf-empty-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 230px;
+    margin: 0 auto;
+}
+
+/* ============================================================
+   聊天页空态 v2.20：状态压一行 + 主次入口
+   原来模型名一行、关联条一行、80px Logo 区、三张等权卡片，
+   进页面看不到重点；入口还跟顶部胶囊重复。
+   ============================================================ */
+
+.chat-status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 2px 0 12px;
+}
+.chat-model-chip {
+    flex: 0 0 auto;
+    max-width: 42%;
+    padding: 3px 10px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* 关联条改成 chip 形态，跟模型名并排 */
+.chat-status-row .chat-novel-ctx {
+    flex: 1;
+    min-width: 0;
+    margin-bottom: 0;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    line-height: 1.5;
+}
+.chat-status-row .cnc-dot { width: 6px; height: 6px; }
+
+.chat-action-list { gap: 10px; padding-top: 6px; }
+
+/* 主入口：墨底，整屏唯一实心块 */
+.chat-primary-action {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px;
+    background: var(--ink);
+    color: var(--paper);
+    border-radius: 16px;
+    box-shadow: 0 4px 14px rgba(25, 23, 20, .16);
+    cursor: pointer;
+}
+.chat-primary-action:active { background: #000; }
+.cpa-body { flex: 1; min-width: 0; }
+.cpa-title {
+    font-family: var(--serif);
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+}
+.cpa-desc {
+    font-size: 11.5px;
+    color: rgba(244, 241, 234, .62);
+    margin-top: 4px;
+    line-height: 1.5;
+}
+.cpa-arrow {
+    font-size: 22px;
+    line-height: 1;
+    color: rgba(244, 241, 234, .45);
+    padding-left: 6px;
+}
+
+/* 次入口：两列，标题 + 一句说明 */
+.chat-mini-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+.chat-mini-card {
+    padding: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    cursor: pointer;
+}
+.chat-mini-card:active { background: var(--surface-2); }
+.cm-title {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: -.005em;
+}
+.cm-desc {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 4px;
+}
+
+/* 聊天空态：入口紧跟胶囊行。试过 margin:auto 居中，
+   结果胶囊和入口被拉开 250px，两块本来有因果关系的元素反而断了。 */
+.chat-action-list {
+    margin-top: 18px;
+}
+
+/* 详情页封面跟书架用同一套书脊配色 */
+.novel-header-card .novel-header-cover {
+    background: var(--cv-bg, var(--surface-2));
+    color: var(--cv-fg, var(--text));
+    border: 0;
+    box-shadow: inset 5px 0 0 rgba(0, 0, 0, .14), 0 1px 3px rgba(25, 23, 20, .12);
+}
+
+/* 详情页工具栏横向可滑，但右边被切掉时没有任何提示，
+   用户不知道还有「钩子 / 多Agent / 一致性 / 导出」。加一层渐隐。 */
+.nd-actions {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent 100%);
+    mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent 100%);
+    padding-bottom: 8px;
+}
+.nd-actions .btn {
+    height: 34px;
+    padding: 0 14px;
+    font-size: 12.5px;
+    border-radius: 999px;
+}

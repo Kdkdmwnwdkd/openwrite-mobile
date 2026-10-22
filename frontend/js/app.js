@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.19.4',   // 与 package.json 保持一致
+    VERSION: '2.21.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1955,11 +1955,13 @@ async function renderChat(container) {
 
     container.innerHTML = `
         <div style="padding: 0 16px; display: flex; flex-direction: column; height: calc(100vh - 120px); overflow-y: auto;">
-            <!-- 顶部模型指示器 -->
-            <div style="font-size: 13px; color: var(--text-tertiary); margin: 4px 0 12px;">${store.modelName}</div>
-
-            <!-- 当前关联作品：AI 写作的设定都来自这里 -->
-            <div class="chat-novel-ctx" id="chat-novel-ctx" onclick="showChatNovelPicker()"></div>
+            <!-- 状态行：模型 + 关联作品压成一行。
+                 原来模型名单独一行、关联条又占一行，加上中间的 Logo 区，
+                 进页面 250px 内一个能点的东西都没有。 -->
+            <div class="chat-status-row">
+                <span class="chat-model-chip">${escapeHtml(store.modelName)}</span>
+                <div class="chat-novel-ctx" id="chat-novel-ctx" onclick="showChatNovelPicker()"></div>
+            </div>
 
             <!-- 快捷工具胶囊行 -->
             <div class="chat-tool-row">
@@ -1969,38 +1971,25 @@ async function renderChat(container) {
                 <button class="chat-tool-pill" onclick="showDeconstruct()"><span class="tool-pill-icon"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span>拆解</button>
             </div>
 
-            <!-- 中央 Logo 区域 -->
-            <div class="chat-hero">
-                <div class="chat-hero-logo"><svg viewBox="0 0 24 24" width="48" height="48" stroke="var(--primary)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg></div>
-                <div class="chat-hero-title">OpenWrite</div>
-                <div class="chat-hero-subtitle">AI 执笔成文 · 你聊设定</div>
-            </div>
-
-            <!-- 操作卡片 -->
+            <!-- 入口：一个主操作 + 两个次操作。
+                 原来三张卡片等权，读完不知道先点哪个。 -->
             <div class="chat-action-list">
-                <div class="chat-action-card" onclick="createNovelWithAI()">
-                    <div class="chat-action-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="var(--primary)" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></div>
-                    <div class="chat-action-body">
-                        <div class="chat-action-title">新书启航</div>
-                        <div class="chat-action-desc">AI 对话式创建，只需输入类型和书名</div>
+                <div class="chat-primary-action" onclick="createNovelWithAI()">
+                    <div class="cpa-body">
+                        <div class="cpa-title">新书启航</div>
+                        <div class="cpa-desc">聊两句就建出书，说个类型和书名就行</div>
                     </div>
-                    <span class="chat-action-arrow">›</span>
+                    <span class="cpa-arrow">›</span>
                 </div>
-                <div class="chat-action-card" onclick="continueWriting()">
-                    <div class="chat-action-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="#f59e0b" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg></div>
-                    <div class="chat-action-body">
-                        <div class="chat-action-title">继续写作</div>
-                        <div class="chat-action-desc">继续上一次的对话</div>
+                <div class="chat-mini-row">
+                    <div class="chat-mini-card" onclick="continueWriting()">
+                        <div class="cm-title">继续写作</div>
+                        <div class="cm-desc">接上次对话</div>
                     </div>
-                    <span class="chat-action-arrow">›</span>
-                </div>
-                <div class="chat-action-card" onclick="showTutorial()">
-                    <div class="chat-action-icon"><svg viewBox="0 0 24 24" width="24" height="24" stroke="#ec4899" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></div>
-                    <div class="chat-action-body">
-                        <div class="chat-action-title">使用教程</div>
-                        <div class="chat-action-desc">查看使用手册</div>
+                    <div class="chat-mini-card" onclick="showTutorial()">
+                        <div class="cm-title">使用教程</div>
+                        <div class="cm-desc">查看手册</div>
                     </div>
-                    <span class="chat-action-arrow">›</span>
                 </div>
             </div>
 
@@ -2109,7 +2098,7 @@ async function renderChatNovelCtx() {
     if (!el) return;
     const novelId = store.chatNovelId;
     if (!novelId) {
-        el.innerHTML = `<span class="cnc-dot"></span><span class="cnc-text">未关联作品 · 自由聊天（点此关联，AI 写作时自动带上设定）</span><span class="cnc-arrow">›</span>`;
+        el.innerHTML = `<span class="cnc-dot"></span><span class="cnc-text">未关联 · 点此选作品</span><span class="cnc-arrow">›</span>`;
         el.classList.remove('bound');
         return;
     }
@@ -2123,7 +2112,7 @@ async function renderChatNovelCtx() {
     }
     const chars = await novelManager.listCharacters(novelId).catch(() => []);
     const wbs = await novelManager.listWorldbuilding(novelId).catch(() => []);
-    el.innerHTML = `<span class="cnc-dot on"></span><span class="cnc-text">📖 《${escapeHtml(novel.title)}》 · 角色 ${chars.length} · 设定 ${wbs.length}（聊天中可一键沉淀）</span><span class="cnc-arrow">›</span>`;
+    el.innerHTML = `<span class="cnc-dot on"></span><span class="cnc-text">《${escapeHtml(novel.title)}》 · 角色 ${chars.length} · 设定 ${wbs.length}</span><span class="cnc-arrow">›</span>`;
     el.classList.add('bound');
 }
 
@@ -2955,32 +2944,12 @@ async function renderBookshelf(container) {
         store.novels = novels;
 
         if (novels.length === 0) {
+            // 空书架不该先摆一排「0 0 0」的统计卡 —— 那是给有数据的人看的。
             container.innerHTML = `
-                <div class="stats-dashboard">
-                    <div class="stats-dashboard-title">📊 数据统计</div>
-                    <div class="stats-grid-3">
-                        <div class="stat-card">
-                            <div class="stat-card-icon">📚</div>
-                            <div class="stat-card-value">0</div>
-                            <div class="stat-card-label">作品总数</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-icon">📝</div>
-                            <div class="stat-card-value">0</div>
-                            <div class="stat-card-label">章节总数</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-icon">📊</div>
-                            <div class="stat-card-value">0</div>
-                            <div class="stat-card-label">总字数</div>
-                        </div>
-                    </div>
-                </div>
-                <div class="empty-state">
-                    <div class="empty-icon">📖</div>
-                    <div class="empty-title">书架空空如也</div>
-                    <div class="empty-desc">新建一本开始写，或者把旧稿导进来</div>
-                    <div class="empty-actions">
+                <div class="shelf-empty">
+                    <div class="shelf-empty-title">还没有作品</div>
+                    <div class="shelf-empty-desc">新建一本，或者把在别处写的旧稿导进来</div>
+                    <div class="shelf-empty-actions">
                         <button class="btn btn-primary" onclick="createNovelWithAI()">新建作品</button>
                         <button class="btn btn-outline" onclick="importNovel()">导入旧稿</button>
                     </div>
@@ -3011,7 +2980,7 @@ async function renderBookshelf(container) {
                 const chs = await novelManager.listChapters(recent.id);
                 const last = chs.slice().sort((a, b) => b.number - a.number)[0];
                 if (last) {
-                    const chTitle = (last.title || '').replace(/^第\d+章\s*/, '') || '未命名';
+                    const chTitle = (last.title || '').replace(CHAPTER_PREFIX_RE, '').trim() || '未命名';
                     resumeHtml = `
                         <div class="resume-card" onclick="navigateTo('chapterEdit', { novelId: '${recent.id}', chapterNum: ${last.number} })">
                             <div class="resume-cover">${escapeHtml((recent.title || '书').charAt(0))}</div>
@@ -3031,38 +3000,26 @@ async function renderBookshelf(container) {
         container.innerHTML = `
             ${dailyHtml}
             ${resumeHtml}
-            <div class="stats-dashboard">
-                <div class="stats-dashboard-title">📊 数据统计</div>
-                <div class="stats-grid-3">
-                    <div class="stat-card">
-                        <div class="stat-card-icon">📚</div>
-                        <div class="stat-card-value">${stats.totalNovels}</div>
-                        <div class="stat-card-label">作品总数</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-card-icon">📝</div>
-                        <div class="stat-card-value">${stats.totalChapters}</div>
-                        <div class="stat-card-label">章节总数</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-card-icon">📊</div>
-                        <div class="stat-card-value">${(stats.totalWords).toLocaleString()}</div>
-                        <div class="stat-card-label">总字数</div>
-                    </div>
-                </div>
-            </div>
+            <div class="shelf-meta">${stats.totalNovels} 本 · ${stats.totalChapters} 章 · ${fmtWords(stats.totalWords)}</div>
             <div class="novel-list">
-                ${novels.map(novel => `
+                ${novels.map(novel => {
+                    const tone = coverTone(novel.title);
+                    const sub = [
+                        novel.genre ? escapeHtml(novel.genre) : '',
+                        `${novel.chapterCount || 0} 章`,
+                        fmtWords(novel.wordCount)
+                    ].filter(Boolean).join(' · ');
+                    return `
                     <div class="novel-item" onclick="navigateTo('novelDetail', { novelId: '${novel.id}' })">
-                        <div class="novel-cover">${escapeHtml((novel.title || "?").charAt(0))}</div>
+                        <div class="novel-cover" style="--cv-bg:${tone[0]};--cv-fg:${tone[1]}">${escapeHtml((novel.title || "?").charAt(0))}</div>
                         <div class="novel-info">
                             <div class="novel-title">${escapeHtml(novel.title)}</div>
-                            <div class="novel-meta">${novel.chapterCount || 0}章 · ${(novel.wordCount || 0).toLocaleString()}字 · ${formatDate(novel.updated)}</div>
-                            ${novel.genre ? `<div class="novel-genre">${escapeHtml(novel.genre)}</div>` : ''}
+                            <div class="novel-sub">${sub}</div>
+                            <div class="novel-time">${formatDate(novel.updated)}</div>
                         </div>
-                        <div class="novel-badge">当前</div>
-                    </div>
-                `).join('')}
+                        <span class="novel-arrow">›</span>
+                    </div>`;
+                }).join('')}
             </div>`;
     } catch (err) {
         ui.showEmptyState(container, { icon: '⚠️', title: '加载失败', desc: err.message });
@@ -3097,7 +3054,7 @@ async function renderNovelDetail(container, novelId) {
         
         container.innerHTML = `
             <div class="novel-header-card">
-                <div class="novel-header-cover">${escapeHtml((novel.title || "?").charAt(0))}</div>
+                <div class="novel-header-cover" style="--cv-bg:${coverTone(novel.title)[0]};--cv-fg:${coverTone(novel.title)[1]}">${escapeHtml((novel.title || "?").charAt(0))}</div>
                 <div class="novel-header-info">
                     <div class="novel-header-title">${escapeHtml(novel.title)}</div>
                     <div class="novel-header-meta">${novel.chapterCount || 0}章 · ${(novel.wordCount || 0).toLocaleString()}字</div>
@@ -3408,11 +3365,14 @@ async function doImport(fallbackTitle) {
 }
 
 // ===== 分卷 / 章节排序（v2.10.1）=====
+// 章号前缀：阿拉伯数字和中文数字都要剥。
+// 原来只匹配「第12章」，标题写成「第一章 石阶」时会渲染成「第1章 第一章 石阶」。
+const CHAPTER_PREFIX_RE = /^第\s*[0-9一二三四五六七八九十百千零两]+\s*[章节回]\s*[·、.．:：\-—]?\s*/;
+
 function chapterRowHtml(ch, novelId) {
-    // 标题本身常带「第N章」，再前缀一次会变成「第1章 第1章」
     const raw = (ch.title || '').trim();
-    const stripped = raw.replace(/^第\d+章\s*/, '').trim();
-    const shown = stripped || raw.replace(/^第\d+章\s*/, '') || '';
+    const stripped = raw.replace(CHAPTER_PREFIX_RE, '').trim();
+    const shown = stripped || raw.replace(CHAPTER_PREFIX_RE, '') || '';
     return `<div class="tree-file ch-row" onclick="event.stopPropagation(); navigateTo('chapterEdit', { novelId: '${novelId}', chapterNum: ${ch.number} })">
         <span class="tree-file-icon">📄</span>
         <span class="tree-file-name">第${ch.number}章${shown ? ' ' + escapeHtml(shown) : ''}</span>
@@ -5781,6 +5741,35 @@ function closeModal() {
 }
 
 // ===== Utilities =====
+// 书脊配色：按书名哈希固定取一组，同一本书每次都同色，不同书不同色。
+// 原来的封面是统一灰底 + 首字，四本书摆在一起完全分不出谁是谁。
+// 色相按 36° 均匀铺开。原来六个色里三个偏棕，四本书摆出来有两本看着一样。
+const COVER_TONES = [
+    ['#8A4E3C', '#F2E7E2'],   // 赭红
+    ['#7A6335', '#F2EDDF'],   // 土黄
+    ['#5A6638', '#EDF0E0'],   // 苔绿
+    ['#3E6647', '#E4EFE6'],   // 松绿
+    ['#35635A', '#E1EFEC'],   // 青碧
+    ['#35566B', '#E3ECF1'],   // 靛青
+    ['#3B4A72', '#E6E8F2'],   // 藏蓝
+    ['#52407A', '#EBE7F3'],   // 紫檀
+    ['#6E3F6B', '#F0E6EF'],   // 绛紫
+    ['#7A3E54', '#F2E6EA']    // 梅红
+];
+function coverTone(title) {
+    const str = String(title || '书');
+    let h = 0;
+    for (let i = 0; i < str.length; i++) h = (h * 31 + str.codePointAt(i)) % 9973;
+    return COVER_TONES[h % COVER_TONES.length];
+}
+
+// 字数：一万以内给具体数，以上换成"万字"，书架上一眼能比大小
+function fmtWords(n) {
+    const v = Number(n) || 0;
+    if (v < 10000) return `${v.toLocaleString()} 字`;
+    return `${(v / 10000).toFixed(v < 100000 ? 1 : 0)} 万字`;
+}
+
 function formatDate(timestamp) {
     if (!timestamp) return '未知';
     const date = new Date(timestamp);
@@ -5789,8 +5778,13 @@ function formatDate(timestamp) {
     if (diff < 60000) return '刚刚';
     if (diff < 3600000) return `${Math.floor(diff / 60000)}分钟前`;
     if (diff < 86400000) return `${Math.floor(diff / 3600000)}小时前`;
-    if (diff < 604800000) return `${Math.floor(diff / 86400000)}天前`;
-    return date.toLocaleDateString('zh-CN');
+    if (diff < 259200000) return `${Math.floor(diff / 86400000)}天前`;
+    // 统一成「10月14日」。toLocaleDateString 会给 2026/10/14，小字号里又长又难读；
+    // 跨年才带年份，否则书架上一半是日期一半是"3天前"，看起来像没对齐。
+    if (date.getFullYear() !== now.getFullYear()) {
+        return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
+    }
+    return `${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
 // ===== Service Worker =====
