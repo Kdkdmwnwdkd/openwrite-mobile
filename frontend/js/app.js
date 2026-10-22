@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.20.0',   // 与 package.json 保持一致
+    VERSION: '2.19.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
