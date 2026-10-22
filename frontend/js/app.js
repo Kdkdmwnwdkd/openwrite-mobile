@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.24.0',   // 与 package.json 保持一致
+    VERSION: '2.25.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -415,11 +415,20 @@ async function buildLayeredContext(novelId, chapterNum, hintText = '') {
     } catch (e) { /* 场景卡缺失时跳过 */ }
 
     // 3) 本章节拍
+    // 旧写法取的是 b.title || b.content || b，而节拍对象的字段叫 desc ——
+    // 结果每一条都变成 "[object Object]" 喂给模型，等于这个功能一直没生效。
     try {
         const beats = await novelManager.getBeats(novelId, chapterNum);
-        if (beats.length) {
-            parts.push('【本章节拍（按顺序推进）】\n' + beats.map((b, i) => `${i + 1}. ${b.title || b.content || b}`).join('\n'));
-            stats.beats = beats.length;
+        // 默认新建的 4 个空节拍没有内容，不注入，否则 prompt 里全是空行
+        const usable = (beats || []).filter(b => b && (b.desc || b.content || b.title));
+        if (usable.length) {
+            parts.push('【本章节拍（按顺序推进，括号内是篇幅占比）】\n' + usable.map((b, i) => {
+                const label = b.label || '';
+                const text = b.desc || b.content || b.title || '';
+                const pct = Number(b.pct) > 0 ? '（约' + b.pct + '%）' : '';
+                return (i + 1) + '. ' + (label ? label + '：' : '') + text + pct;
+            }).join('\n'));
+            stats.beats = usable.length;
         }
     } catch (e) { /* 忽略 */ }
 
@@ -8087,116 +8096,175 @@ ${context}
 // ===== Beat Control Page (v2.4.0) =====
 let beatEditData = null;
 
+const BEAT_LABELS = { setup: '铺陈', conflict: '冲突', climax: '高潮', hook: '钩子', transition: '过渡' };
+
+function beatRowHtml(b, i) {
+    const t = b.type || 'transition';
+    const opt = (v) => '<option value="' + v + '"' + (t === v ? ' selected' : '') + '>'
+        + BEAT_LABELS[v] + '</option>';
+    return '<div class="beat-item" data-idx="' + i + '">'
+        + '<div class="beat-num">' + (i + 1) + '</div>'
+        + '<div style="flex:1;min-width:0;">'
+        + '<div class="beat-row-top">'
+        + '<select class="input beat-type" id="beat-type-' + i + '">'
+        + opt('setup') + opt('conflict') + opt('climax') + opt('hook') + opt('transition')
+        + '</select>'
+        + '<input type="number" class="input beat-pct" id="beat-pct-' + i + '" value="' + (b.pct || 10) + '" min="1" max="100">'
+        + '<span class="beat-pct-unit">%</span>'
+        + '<button class="beat-del" onclick="removeBeat(' + i + ')">✕</button>'
+        + '</div>'
+        + '<input type="text" class="input beat-desc" id="beat-desc-' + i + '"'
+        + ' value="' + escapeAttr(b.desc || '') + '"'
+        + ' placeholder="谁在哪做了什么，到这一步什么变了">'
+        + '</div></div>';
+}
+
+function paintBeats() {
+    const box = document.getElementById('beat-list');
+    if (!box || !beatEditData) return;
+    if (!beatEditData.beats.length) {
+        box.innerHTML = '<div class="beat-empty">还没有节拍。点下面的按钮按大纲自动拆一份，也可以手动加。</div>'
+            + '<button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="addBeat()">+ 手动添加</button>';
+        return;
+    }
+    box.innerHTML = beatEditData.beats.map(beatRowHtml).join('')
+        + '<button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="addBeat()">+ 添加节拍</button>';
+}
+
+// 把界面上改过的内容读回内存，再重绘/保存，避免刷新时丢掉刚输入的字
+function readBeatsFromDom() {
+    if (!beatEditData) return;
+    const items = document.querySelectorAll('#beat-list .beat-item');
+    if (!items.length) return;
+    const out = [];
+    items.forEach((el, i) => {
+        const type = (document.getElementById('beat-type-' + i) || {}).value || 'transition';
+        const pct = parseInt((document.getElementById('beat-pct-' + i) || {}).value || '10', 10);
+        const desc = (document.getElementById('beat-desc-' + i) || {}).value || '';
+        out.push({ type, label: BEAT_LABELS[type] || '过渡', desc, pct });
+    });
+    beatEditData.beats = out;
+}
+
 async function renderBeatControl(container, novelId, chapterNum) {
     const novel = await novelManager.get(novelId);
-    const chapter = await novelManager.getChapter(novelId, chapterNum);
     if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
-    ui.setPageTitle(`第${chapterNum}章 节拍控制`);
-    ui.setHeaderActions(`
-        <button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>
-        <button class="header-btn" onclick="saveBeatControl()">保存</button>
-    `);
+    ui.setPageTitle('第' + chapterNum + '章节拍');
+    ui.setHeaderActions('<button class="header-btn" onclick="saveBeatControl()">保存</button>');
 
-    let beats = await novelManager.getBeats(novelId, chapterNum);
-    if (!beats || beats.length === 0) {
-        beats = [
-            { type: 'setup', label: '铺陈', desc: '', pct: 25 },
-            { type: 'conflict', label: '冲突', desc: '', pct: 25 },
-            { type: 'climax', label: '高潮', desc: '', pct: 25 },
-            { type: 'hook', label: '钩子', desc: '', pct: 25 }
-        ];
-    }
-    beatEditData = { novelId, chapterNum, beats };
-
-    const renderBeats = () => `
-        ${beats.map((b, i) => `
-            <div class="beat-item" data-idx="${i}">
-                <div class="beat-num">${i + 1}</div>
-                <div style="flex:1;">
-                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                        <select class="input" id="beat-type-${i}" style="width:90px;flex-shrink:0;padding:6px 8px;font-size:13px;">
-                            <option value="setup" ${b.type==='setup'?'selected':''}>铺陈</option>
-                            <option value="conflict" ${b.type==='conflict'?'selected':''}>冲突</option>
-                            <option value="climax" ${b.type==='climax'?'selected':''}>高潮</option>
-                            <option value="hook" ${b.type==='hook'?'selected':''}>钩子</option>
-                            <option value="transition" ${b.type==='transition'?'selected':''}>过渡</option>
-                        </select>
-                        <input type="number" class="input" id="beat-pct-${i}" value="${b.pct}" min="1" max="100" style="width:70px;flex-shrink:0;padding:6px 8px;font-size:13px;text-align:center;">%
-                        <button class="btn btn-outline" style="padding:4px 8px;font-size:12px;" onclick="removeBeat(${i})">✕</button>
-                    </div>
-                    <input type="text" class="input" id="beat-desc-${i}" value="${escapeHtml(b.desc || '')}" placeholder="描述该节拍的核心内容…" style="font-size:13px;padding:8px;">
-                </div>
-            </div>
-        `).join('')}
-        <button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="addBeat()">+ 添加节拍</button>
-    `;
+    const beats = await novelManager.getBeats(novelId, chapterNum);
+    beatEditData = { novelId, chapterNum, beats: Array.isArray(beats) ? beats : [] };
 
     container.innerHTML = `
-        <div style="padding: 12px 16px;">
-            <div style="font-size: 13px; color: var(--text-tertiary); margin-bottom: 12px;">
-                🎬 定义本章的叙事节奏。AI 写作时将按节拍分配篇幅与情绪强度。
-            </div>
-            <div id="beat-list">${renderBeats()}</div>
-            <button class="btn btn-primary btn-block" style="margin-top: 12px;" onclick="aiCheckBeats('${novelId}', ${chapterNum})">🤖 AI 校验节拍</button>
-            <div id="beat-check-result" style="margin-top: 12px;"></div>
-        </div>
-    `;
+        <div class="beat-page">
+            <div class="beat-intro">节拍决定这一章怎么推进。AI 续写时会按这些节拍走，而不是自己拆场景。
+            每条都要落到「谁在哪做了什么、什么变了」——「冲突升级」这种写不出来。</div>
+            <div id="beat-list"></div>
+            <button class="btn btn-primary btn-block" style="margin-top:12px;"
+                onclick="aiDraftBeats('${novelId}', ${chapterNum})">按大纲拆节拍</button>
+            <button class="btn btn-outline btn-block" style="margin-top:8px;"
+                onclick="aiCheckBeats('${novelId}', ${chapterNum})">检查节拍是否成立</button>
+            <div id="beat-check-result" style="margin-top:12px;"></div>
+        </div>`;
+    paintBeats();
+}
+
+// 按大纲自动拆 6-8 个场景节拍。以前每个新章节默认 4 个空框（铺陈/冲突/高潮/钩子），
+// 用户得自己填，实际没人填；更糟的是这 4 个空框会被当成节拍注入 prompt。
+async function aiDraftBeats(novelId, chapterNum) {
+    readBeatsFromDom();
+    if (beatEditData && beatEditData.beats.some(b => b.desc)) {
+        if (!confirm('这一章已经有节拍了。重新拆会覆盖现有的内容，继续？')) return;
+    }
+
+    ui.showToast('正在按大纲拆…', 3000);
+    try {
+        const novel = await novelManager.get(novelId);
+        const outline = await novelManager.getOutline(novelId);
+        const node = findOutlineChapter(outline, chapterNum);
+        const chapter = await novelManager.getChapter(novelId, chapterNum);
+        const summary = (node && node.summary) || (chapter && chapter.summary) || '';
+        if (!summary) {
+            ui.showToast('这一章还没有大纲，先去大纲里补一句本章要发生什么');
+            return;
+        }
+
+        // 上一章结尾给个衔接锚点
+        let prevTail = '';
+        try {
+            const chs = await novelManager.listChapters(novelId);
+            const prev = chs.filter(c => c.number < chapterNum).sort((a, b) => b.number - a.number)[0];
+            if (prev && prev.content) prevTail = String(prev.content).slice(-200);
+        } catch (_) {}
+
+        const prompt = '把这一章拆成 6-8 个场景节拍。\n\n'
+            + '小说：《' + (novel.title || '') + '》\n'
+            + '本章：第' + chapterNum + '章 ' + ((node && node.title) || '') + '\n'
+            + '本章概要：' + summary + '\n'
+            + (prevTail ? '上一章结尾：' + prevTail + '\n' : '')
+            + `\n要求：
+1. 每个节拍写清「谁、在哪、做了什么」，以及「到这一步什么变了」。
+2. 不许写"冲突升级""气氛紧张""推进剧情"这类不可执行的话。
+3. 按叙事顺序排列，覆盖全章，不重复。
+4. pct 是篇幅占比，总和约 100。
+5. type 只能取 setup / conflict / climax / hook / transition。
+
+只输出 JSON，不要 markdown 代码块：
+{"beats":[{"type":"setup","desc":"陈默雨夜收车，后座落下把钥匙","pct":15}]}`;
+
+        const raw = await ai.chat([
+            { role: 'system', content: '你是网文结构编辑，只输出可执行的场景节拍。' },
+            { role: 'user', content: prompt }
+        ], null, 1800);
+
+        const plan = parseJsonLoose(raw, '{', '}', (v) => v && Array.isArray(v.beats) && v.beats.length);
+        if (!plan) { ui.showToast('没拆出来（模型返回格式不对），再试一次'); return; }
+
+        beatEditData.beats = plan.beats.slice(0, 12).map(b => {
+            const type = BEAT_LABELS[b.type] ? b.type : 'transition';
+            return {
+                type,
+                label: BEAT_LABELS[type],
+                desc: String(b.desc || b.text || '').trim(),
+                pct: Math.max(1, Math.min(100, Number(b.pct) || 10))
+            };
+        }).filter(b => b.desc);
+
+        paintBeats();
+        ui.showToast('拆出 ' + beatEditData.beats.length + ' 个节拍，记得点右上角保存', 4000);
+    } catch (e) {
+        ui.showToast('拆节拍失败：' + e.message);
+    }
 }
 
 function addBeat() {
+    readBeatsFromDom();
     if (!beatEditData) return;
-    beatEditData.beats.push({ type: 'transition', label: '过渡', desc: '', pct: 20 });
-    const container = document.getElementById('beat-list');
-    if (container) {
-        const novelId = beatEditData.novelId;
-        const chapterNum = beatEditData.chapterNum;
-        const beats = beatEditData.beats;
-        container.innerHTML = beats.map((b, i) => `
-            <div class="beat-item" data-idx="${i}">
-                <div class="beat-num">${i + 1}</div>
-                <div style="flex:1;">
-                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                        <select class="input" id="beat-type-${i}" style="width:90px;flex-shrink:0;padding:6px 8px;font-size:13px;">
-                            <option value="setup" ${b.type==='setup'?'selected':''}>铺陈</option>
-                            <option value="conflict" ${b.type==='conflict'?'selected':''}>冲突</option>
-                            <option value="climax" ${b.type==='climax'?'selected':''}>高潮</option>
-                            <option value="hook" ${b.type==='hook'?'selected':''}>钩子</option>
-                            <option value="transition" ${b.type==='transition'?'selected':''}>过渡</option>
-                        </select>
-                        <input type="number" class="input" id="beat-pct-${i}" value="${b.pct}" min="1" max="100" style="width:70px;flex-shrink:0;padding:6px 8px;font-size:13px;text-align:center;">%
-                        <button class="btn btn-outline" style="padding:4px 8px;font-size:12px;" onclick="removeBeat(${i})">✕</button>
-                    </div>
-                    <input type="text" class="input" id="beat-desc-${i}" value="${escapeHtml(b.desc || '')}" placeholder="描述该节拍的核心内容…" style="font-size:13px;padding:8px;">
-                </div>
-            </div>
-        `).join('') + `<button class="btn btn-secondary btn-block" style="margin-top:8px;" onclick="addBeat()">+ 添加节拍</button>`;
-    }
+    beatEditData.beats.push({ type: 'transition', label: '过渡', desc: '', pct: 10 });
+    paintBeats();
 }
 
 function removeBeat(idx) {
+    readBeatsFromDom();
     if (!beatEditData) return;
     beatEditData.beats.splice(idx, 1);
-    addBeat(); // re-render
+    paintBeats();
 }
 
 async function saveBeatControl() {
     if (!beatEditData) return;
-    const { novelId, chapterNum } = beatEditData;
-    const beats = [];
-    const container = document.getElementById('beat-list');
-    if (!container) return;
-    const items = container.querySelectorAll('.beat-item');
-    items.forEach((el, i) => {
-        const type = document.getElementById(`beat-type-${i}`)?.value || 'transition';
-        const pct = parseInt(document.getElementById(`beat-pct-${i}`)?.value || '20', 10);
-        const desc = document.getElementById(`beat-desc-${i}`)?.value || '';
-        beats.push({ type, label: type==='setup'?'铺陈':type==='conflict'?'冲突':type==='climax'?'高潮':type==='hook'?'钩子':'过渡', desc, pct });
-    });
-    await novelManager.saveBeats(novelId, chapterNum, beats);
-    ui.showToast('节拍已保存');
+    readBeatsFromDom();
+    const { novelId, chapterNum, beats } = beatEditData;
+    try {
+        await novelManager.saveBeats(novelId, chapterNum, beats);
+        ui.showToast('节拍已保存（' + beats.length + ' 条）');
+    } catch (e) {
+        ui.showToast('保存失败：' + e.message);
+    }
 }
 
 async function aiCheckBeats(novelId, chapterNum) {
+    readBeatsFromDom();   // 用户可能改过还没保存
     const novel = await novelManager.get(novelId);
     const chapter = await novelManager.getChapter(novelId, chapterNum);
     const beats = beatEditData?.beats || await novelManager.getBeats(novelId, chapterNum);
