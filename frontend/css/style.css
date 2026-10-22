@@ -5836,3 +5836,143 @@ body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary
     border: 1px dashed var(--border);
     border-radius: 12px;
 }
+
+/* ===== 节拍落地状态 ===== */
+.beat-status {
+    font-size: 10.5px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    margin-right: auto;
+    white-space: nowrap;
+}
+.beat-status.st-done { color: #15803d; background: rgba(34, 197, 94, .12); }
+.beat-status.st-partial { color: #b45309; background: rgba(245, 158, 11, .14); }
+.beat-status.st-missed { color: #b91c1c; background: rgba(220, 38, 38, .10); }
+
+.beat-item.st-done { border-color: rgba(34, 197, 94, .35); }
+.beat-item.st-partial { border-color: rgba(245, 158, 11, .40); }
+.beat-item.st-missed { border-color: rgba(220, 38, 38, .30); }
+
+.beat-evidence {
+    margin-top: 6px;
+    padding: 6px 9px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    background: var(--bg);
+    border-radius: 6px;
+}
+.beat-note {
+    margin-top: 5px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: #b45309;
+}
+
+/* ===== 全书节奏总览 ===== */
+.pace-page { padding: 12px 16px; }
+
+.pace-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+.pace-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
+.pace-key i {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    display: inline-block;
+}
+
+.pace-ok {
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    font-size: 12.5px;
+    color: #15803d;
+    background: rgba(34, 197, 94, .10);
+    border-radius: 10px;
+}
+
+.pace-issues {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+.pace-issue {
+    padding: 10px 12px;
+    font-size: 12.5px;
+    line-height: 1.65;
+    border-radius: 10px;
+    border-left: 3px solid var(--border);
+}
+.pace-issue.lv-warn {
+    color: #8a4a06;
+    background: rgba(245, 158, 11, .10);
+    border-left-color: #d97706;
+}
+.pace-issue.lv-info {
+    color: var(--text-secondary);
+    background: var(--bg);
+    border-left-color: var(--text-tertiary);
+}
+
+.pace-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.pace-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 11px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+}
+.pace-num {
+    flex: 0 0 22px;
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+.pace-main { flex: 1; min-width: 0; }
+.pace-title {
+    font-size: 12.5px;
+    margin-bottom: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pace-bar {
+    display: flex;
+    height: 9px;
+    border-radius: 5px;
+    overflow: hidden;
+    background: var(--bg);
+}
+.pace-bar i { display: block; height: 100%; }
+.pace-bar.pace-empty {
+    background: repeating-linear-gradient(90deg, var(--border) 0 6px, transparent 6px 12px);
+}
+.pace-meta {
+    flex: 0 0 auto;
+    font-size: 10.5px;
+    color: var(--text-tertiary);
+}
+.pace-foot {
+    margin-top: 14px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text-tertiary);
+}

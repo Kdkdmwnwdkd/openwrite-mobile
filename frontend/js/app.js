@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.25.0',   // 与 package.json 保持一致
+    VERSION: '2.26.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1907,6 +1907,7 @@ function navigateTo(page, params = {}, isRootTab = false) {
         sync: renderSync,
         // 节拍控制
         beatControl: (view) => renderBeatControl(view, params.novelId, params.chapterNum),
+        pacingOverview: (view) => renderPacingOverview(view, params.novelId),
         // 角色卡
         characterCards: (view) => renderCharacterCards(view, params.novelId),
         characterEdit: (view) => renderCharacterEdit(view, params.novelId, params.characterId),
@@ -3111,6 +3112,7 @@ async function renderNovelDetail(container, novelId) {
                 <button class="btn btn-outline" onclick="navigateTo('foreshadowing', { novelId: '${novelId}' })">🧵 伏笔</button>
                 <button class="btn btn-outline" onclick="showReaderAuditModal('${novelId}')">📈 体检</button>
                 <button class="btn btn-outline" onclick="scanChapterHooks('${novelId}')">🪝 钩子</button>
+                <button class="btn btn-outline" onclick="navigateTo('pacingOverview', { novelId: '${novelId}' })">📊 节奏</button>
                 <button class="btn btn-outline" onclick="navigateTo('agentStudio', { novelId: '${novelId}' })">🎭 多Agent</button>
                 <button class="btn btn-outline" onclick="navigateTo('consistencyCheck', { novelId: '${novelId}' })">🔍 一致性</button>
                 <button class="btn btn-outline" onclick="navigateTo('novelExport', { novelId: '${novelId}' })">📤 导出</button>
@@ -8096,13 +8098,161 @@ ${context}
 // ===== Beat Control Page (v2.4.0) =====
 let beatEditData = null;
 
+// ===== 全书节奏总览（纯本地）=====
+// 单章节拍只能看出"这一章怎么走"，看不出"整本书什么时候才有高潮"。
+// 这里把每章的节拍占比堆成一条条，一眼能看到：前五章全是浅色（铺陈），
+// 或者中间连着七八章没有深色（高潮）。
+const PACE_COLORS = {
+    setup: '#CFC7B8',
+    transition: '#E3DCCD',
+    conflict: '#8B7F6C',
+    climax: '#3A342C',
+    hook: '#1A1714'
+};
+
+async function renderPacingOverview(container, novelId) {
+    const novel = await novelManager.get(novelId);
+    if (!novel) { ui.showToast('作品不存在'); navigateTo('bookshelf'); return; }
+    ui.setPageTitle('节奏总览');
+    ui.setHeaderActions(`<button class="header-btn" onclick="navigateTo('novelDetail', { novelId: '${novelId}' })">返回</button>`);
+
+    const chapters = (await novelManager.listChapters(novelId)).sort((a, b) => a.number - b.number);
+    if (!chapters.length) {
+        container.innerHTML = '<div class="empty-state"><div class="empty-title">还没有章节</div>'
+            + '<div class="empty-desc">先写出章节，再来看整体节奏</div></div>';
+        return;
+    }
+
+    const beatsMap = novel.beats || {};
+    const rows = chapters.map(ch => {
+        const bs = (beatsMap[ch.number] || []).filter(b => b && (b.desc || b.content));
+        if (!bs.length) return { num: ch.number, title: ch.title, empty: true };
+        const sum = { setup: 0, transition: 0, conflict: 0, climax: 0, hook: 0 };
+        bs.forEach(b => {
+            const t = sum[b.type] !== undefined ? b.type : 'transition';
+            sum[t] += Number(b.pct) || 0;
+        });
+        const total = Object.values(sum).reduce((a, b) => a + b, 0) || 1;
+        // 第一次冲突/高潮出现在第几条（1 起算，0 = 整章都没有）
+        const hotIdx = bs.findIndex(b => b.type === 'conflict' || b.type === 'climax') + 1;
+        // 前三条是否全是铺垫/过渡
+        const firstThree = bs.slice(0, 3);
+        const slowThree = firstThree.length === 3 && firstThree.every(b => b.type === 'setup' || b.type === 'transition');
+        return { num: ch.number, title: ch.title, sum, total, count: bs.length, firstHot: hotIdx, slowThree };
+    });
+
+    // 诊断：只说真问题，不凑数
+    const issues = [];
+    const noBeat = rows.filter(r => r.empty).map(r => r.num);
+    if (noBeat.length) {
+        issues.push({
+            level: 'warn',
+            text: '第 ' + fmtRange(noBeat) + ' 章没有节拍。写这些章时模型会自己拆场景，容易一章塞三四个转折。'
+        });
+    }
+
+    const slowOpen = rows.filter(r => !r.empty && (r.slowThree || r.firstHot === 0)).map(r => r.num);
+    if (slowOpen.length) {
+        issues.push({
+            level: 'warn',
+            text: '第 ' + fmtRange(slowOpen) + ' 章前三条节拍都在铺垫（或者整章没有冲突），第一次冲突来得偏晚。'
+        });
+    }
+
+    // 连续 4 章以上高潮占比 < 5%
+    let run = [];
+    const flushRun = () => {
+        if (run.length >= 4) {
+            issues.push({
+                level: 'warn',
+                text: '第 ' + fmtRange(run.map(r => r.num)) + ' 章连续没有高潮（climax 占比低于 5%），读者容易中途弃。'
+            });
+        }
+        run = [];
+    };
+    rows.forEach(r => {
+        if (r.empty) { flushRun(); return; }
+        const c = (r.sum.climax / r.total) * 100;
+        if (c < 5) run.push(r); else flushRun();
+    });
+    flushRun();
+
+    // 钩子占比低于 3%（注意要先乘 100，这里比较的是百分比）
+    const noHook = rows.filter(r => !r.empty && (r.sum.hook / r.total) * 100 < 3).map(r => r.num);
+    if (noHook.length) {
+        issues.push({
+            level: 'info',
+            text: '第 ' + fmtRange(noHook) + ' 章结尾没有钩子。平台看稿第一条就是「章末能不能留住人」。'
+        });
+    }
+
+    const okAll = !issues.length;
+
+    const barHtml = (r) => {
+        if (r.empty) return '<div class="pace-bar pace-empty"></div>';
+        const order = ['setup', 'transition', 'conflict', 'climax', 'hook'];
+        return '<div class="pace-bar">' + order.map(k => {
+            const w = (r.sum[k] / r.total) * 100;
+            return w > 0 ? '<i style="width:' + w.toFixed(1) + '%;background:' + PACE_COLORS[k] + '"></i>' : '';
+        }).join('') + '</div>';
+    };
+
+    container.innerHTML = `
+        <div class="pace-page">
+            <div class="pace-legend">
+                ${[['setup', '铺陈'], ['transition', '过渡'], ['conflict', '冲突'], ['climax', '高潮'], ['hook', '钩子']]
+                    .map(([k, label]) => '<span class="pace-key"><i style="background:' + PACE_COLORS[k] + '"></i>' + label + '</span>').join('')}
+            </div>
+
+            ${okAll ? '<div class="pace-ok">每章都有节拍，冲突和高潮分布也正常。</div>' : ''}
+            ${issues.length ? '<div class="pace-issues">' + issues.map(i =>
+                '<div class="pace-issue lv-' + i.level + '">' + escapeHtml(i.text) + '</div>').join('') + '</div>' : ''}
+
+            <div class="pace-list">
+                ${rows.map(r => `
+                    <div class="pace-row${r.empty ? ' is-empty' : ''}">
+                        <div class="pace-num">${r.num}</div>
+                        <div class="pace-main">
+                            <div class="pace-title">${escapeHtml((r.title || '').replace(CHAPTER_PREFIX_RE, '').trim() || '未命名')}</div>
+                            ${barHtml(r)}
+                        </div>
+                        <div class="pace-meta">${r.empty ? '无节拍' : r.count + ' 拍'}</div>
+                    </div>`).join('')}
+            </div>
+
+            <div class="pace-foot">只统计已保存的节拍。占比按每条节拍填的 pct 计算，不读正文。</div>
+        </div>`;
+}
+
+// 只合并真正连续的章号。1、5、6 不能写成 "1–6"，
+// 那样读者会以为 2、3、4 也缺节拍。
+function fmtRange(nums) {
+    const a = [...new Set(nums.filter(n => Number.isFinite(n)))].sort((x, y) => x - y);
+    if (!a.length) return '';
+    const groups = [];
+    let start = a[0], prev = a[0];
+    for (let i = 1; i < a.length; i++) {
+        if (a[i] === prev + 1) { prev = a[i]; continue; }
+        groups.push([start, prev]);
+        start = prev = a[i];
+    }
+    groups.push([start, prev]);
+    return groups.map(([s, e]) => (s === e ? String(s) : s + '–' + e)).join('、');
+}
+
 const BEAT_LABELS = { setup: '铺陈', conflict: '冲突', climax: '高潮', hook: '钩子', transition: '过渡' };
 
 function beatRowHtml(b, i) {
     const t = b.type || 'transition';
     const opt = (v) => '<option value="' + v + '"' + (t === v ? ' selected' : '') + '>'
         + BEAT_LABELS[v] + '</option>';
-    return '<div class="beat-item" data-idx="' + i + '">'
+    // 落地状态：写完对照后才有，存在内存里，不写库
+    const f = b.fulfill;
+    const statusHtml = f
+        ? '<span class="beat-status st-' + f.status + '">'
+          + (f.status === 'done' ? '已写' : f.status === 'partial' ? '部分' : '没写') + '</span>'
+        : '';
+    return '<div class="beat-item' + (f ? ' has-status st-' + f.status : '') + '" data-idx="' + i + '">'
         + '<div class="beat-num">' + (i + 1) + '</div>'
         + '<div style="flex:1;min-width:0;">'
         + '<div class="beat-row-top">'
@@ -8111,11 +8261,14 @@ function beatRowHtml(b, i) {
         + '</select>'
         + '<input type="number" class="input beat-pct" id="beat-pct-' + i + '" value="' + (b.pct || 10) + '" min="1" max="100">'
         + '<span class="beat-pct-unit">%</span>'
+        + statusHtml
         + '<button class="beat-del" onclick="removeBeat(' + i + ')">✕</button>'
         + '</div>'
         + '<input type="text" class="input beat-desc" id="beat-desc-' + i + '"'
         + ' value="' + escapeAttr(b.desc || '') + '"'
         + ' placeholder="谁在哪做了什么，到这一步什么变了">'
+        + (f && f.evidence ? '<div class="beat-evidence">「' + escapeHtml(f.evidence) + '」</div>' : '')
+        + (f && f.note ? '<div class="beat-note">' + escapeHtml(f.note) + '</div>' : '')
         + '</div></div>';
 }
 
@@ -8141,7 +8294,9 @@ function readBeatsFromDom() {
         const type = (document.getElementById('beat-type-' + i) || {}).value || 'transition';
         const pct = parseInt((document.getElementById('beat-pct-' + i) || {}).value || '10', 10);
         const desc = (document.getElementById('beat-desc-' + i) || {}).value || '';
-        out.push({ type, label: BEAT_LABELS[type] || '过渡', desc, pct });
+        const prev = beatEditData.beats[i] || {};
+        // 重绘时把落地状态带过去，否则每改一个字结果就没了
+        out.push({ type, label: BEAT_LABELS[type] || '过渡', desc, pct, fulfill: prev.fulfill });
     });
     beatEditData.beats = out;
 }
@@ -8162,6 +8317,8 @@ async function renderBeatControl(container, novelId, chapterNum) {
             <div id="beat-list"></div>
             <button class="btn btn-primary btn-block" style="margin-top:12px;"
                 onclick="aiDraftBeats('${novelId}', ${chapterNum})">按大纲拆节拍</button>
+            <button class="btn btn-outline btn-block" style="margin-top:8px;"
+                onclick="checkBeatFulfillment('${novelId}', ${chapterNum})">对照正文：哪几条真写了</button>
             <button class="btn btn-outline btn-block" style="margin-top:8px;"
                 onclick="aiCheckBeats('${novelId}', ${chapterNum})">检查节拍是否成立</button>
             <div id="beat-check-result" style="margin-top:12px;"></div>
@@ -8234,6 +8391,68 @@ async function aiDraftBeats(novelId, chapterNum) {
         ui.showToast('拆出 ' + beatEditData.beats.length + ' 个节拍，记得点右上角保存', 4000);
     } catch (e) {
         ui.showToast('拆节拍失败：' + e.message);
+    }
+}
+
+// 写完对照：这一章的正文到底落地了哪几条节拍。
+// 模型经常"跳着写"——第 3 条写了，第 4 条直接略过去接第 5 条，
+// 作者事后很难发现，下一章就接不上了。
+async function checkBeatFulfillment(novelId, chapterNum) {
+    readBeatsFromDom();
+    const beats = (beatEditData && beatEditData.beats || []).filter(b => b.desc);
+    if (!beats.length) { ui.showToast('先拆或先写几条节拍'); return; }
+
+    const chapter = await novelManager.getChapter(novelId, chapterNum);
+    if (!chapter || !chapter.content) { ui.showToast('本章还没有正文，写完再来对照'); return; }
+
+    ui.showToast('正在对照…', 3000);
+    try {
+        const beatText = beats.map((b, i) => (i + 1) + '. [' + b.label + '] ' + b.desc).join('\n');
+        const body = String(chapter.content).slice(0, 6000);
+        const prompt = '下面是一章的节拍规划和实际正文。逐条判断这条节拍是否真的写进去了。\n\n'
+            + '【节拍】\n' + beatText + '\n\n'
+            + '【正文】\n' + body + '\n\n'
+            + `判断标准：
+- done：正文里有对应的情节，且该有的"变化"发生了
+- partial：提到了，但只是一笔带过，没形成场景
+- missed：正文里找不到
+
+只输出 JSON，不要解释：
+{"results":[{"idx":1,"status":"done","evidence":"正文里对应的原句，10-30 字，没有就留空","note":"没写或只写一半时，一句提醒"}]}`;
+
+        const raw = await ai.chat([
+            { role: 'system', content: '你是严格的结构审校。只依据正文判断，不要替作者补。' },
+            { role: 'user', content: prompt }
+        ], null, 2000);
+
+        const plan = parseJsonLoose(raw, '{', '}', (v) => v && Array.isArray(v.results));
+        if (!plan) { ui.showToast('没对上（模型返回格式不对），再试一次'); return; }
+
+        const byIdx = {};
+        plan.results.forEach(r => { byIdx[Number(r.idx)] = r; });
+        // 注意：模型返回的 idx 是"过滤掉空描述之后"的序号，
+        // 而 beatEditData.beats 里可能有 desc 为空的占位行。
+        // 直接用全量下标回填会整体错位，所以按同一套过滤顺序回填。
+        const targets = beatEditData.beats.filter(b => b.desc);
+        targets.forEach((b, i) => {
+            const r = byIdx[i + 1];
+            b.fulfill = r ? {
+                status: ['done', 'partial', 'missed'].includes(r.status) ? r.status : 'partial',
+                evidence: String(r.evidence || '').slice(0, 80),
+                note: String(r.note || '').slice(0, 80)
+            } : { status: 'missed', evidence: '', note: '没有返回这一条的判断' };
+        });
+
+        paintBeats();
+        // 对照结果直接落库：离开页面再回来，作者还能看到这一章哪些节拍没写
+        try { await novelManager.saveBeats(novelId, chapterNum, beatEditData.beats); } catch (_) {}
+        const miss = beatEditData.beats.filter(b => b.fulfill && b.fulfill.status === 'missed').length;
+        const part = beatEditData.beats.filter(b => b.fulfill && b.fulfill.status === 'partial').length;
+        ui.showToast(miss || part
+            ? `没写 ${miss} 条、写了一半 ${part} 条`
+            : '每条都写到了', 4000);
+    } catch (e) {
+        ui.showToast('对照失败：' + e.message);
     }
 }
 
