@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.22.0',   // 与 package.json 保持一致
+    VERSION: '2.23.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -5013,7 +5013,8 @@ function renderSettingSummary(plan, a, novelId) {
             + '</span><span class="gs-v">' + escapeHtml(h.value || '') + '</span></div>').join('') + '</div>'
             : '')
         + '<div class="gs-foot">'
-        + '<button class="guide-act" onclick="exportSettingDoc(\'' + escapeJs(novelId) + '\')">导出设定文档</button>'
+        + '<button class="guide-act primary" onclick="guideAdjustOpen(\'' + escapeJs(novelId) + '\')">调整设定</button>'
+        + '<button class="guide-act" onclick="exportSettingDoc(\'' + escapeJs(novelId) + '\')">导出文档</button>'
         + '<button class="guide-act" onclick="guideOpenDetail(\'' + escapeJs(novelId) + '\')">查看作品</button>'
         + '</div></div>';
 }
@@ -5079,6 +5080,413 @@ function guideManual() {
     const slot = document.getElementById('guide-card-slot');
     if (slot) slot.innerHTML = '';
     showCreateNovelModal();
+}
+
+// ===== 改设定：判断范围 → 列失效项 → 按新方向重新规划 =====
+// 参考产品的做法：用户改的如果是一句话就能说清的方向（"换成 2010 年代穿越"），
+// 不是去改一个字段，而是当成"换了个故事"——书名、大纲、开篇建议全都跟着失效。
+// 我们这里分三层：只改书名 / 局部替换 / 全盘重规划。
+
+// 题材 → 关键决策点。这是整件事里最不该让模型临场发挥的部分：
+// 问错问题等于白问，所以硬编码经过验证的分岔口，跑通后再谈自定义。
+const TOPIC_KEYS = {
+    '都市异能': [
+        { key: 'power', title: '金手指来路', q: '这个能力从哪来？', options: ['未来科技', '神秘系统', '家族传承', '有代价的诅咒'] },
+        { key: 'start', title: '故事从哪开始', q: '主角此刻在什么阶段？', options: ['高三', '大学刚毕业', '职场三年', '三十岁重来'] }
+    ],
+    '玄幻仙侠': [
+        { key: 'system', title: '力量体系', q: '修为怎么涨？', options: ['境界晋级', '血脉觉醒', '悟道', '靠吞噬他人'] },
+        { key: 'origin', title: '主角起点', q: '开局是什么身份？', options: ['废柴', '天才', '外来者', '被逐出师门'] }
+    ],
+    '悬疑灵异': [
+        { key: 'case', title: '案件性质', q: '偏哪一路？', options: ['本格推理', '社会派', '灵异', '心理惊悚'] },
+        { key: 'role', title: '主角位置', q: '他是谁？', options: ['查案者', '当事人', '嫌疑人', '旁观者'] }
+    ],
+    '历史架空': [
+        { key: 'identity', title: '穿越身份', q: '落在什么身份上？', options: ['平民', '权贵子弟', '军中', '宫中'] },
+        { key: 'era', title: '时代节点', q: '什么世道？', options: ['乱世将起', '盛世之下', '王朝末年', '改朝换代'] }
+    ],
+    '言情': [
+        { key: 'relation', title: '关系起点', q: '两人怎么开始？', options: ['先婚后爱', '破镜重圆', '双向暗恋', '宿敌'] },
+        { key: 'block', title: '外部阻碍', q: '什么在拦着他们？', options: ['家族', '阶层', '职业', '旧事'] }
+    ],
+    '科幻末世': [
+        { key: 'disaster', title: '灾变类型', q: '世界怎么变成这样的？', options: ['病毒', '天灾', 'AI 接管', '维度入侵'] },
+        { key: 'survive', title: '生存方式', q: '主角靠什么活？', options: ['囤积物资', '加入营地', '独行', '建立势力'] }
+    ],
+    '规则怪谈': [
+        { key: 'rule', title: '规则来路', q: '规则是谁定的？', options: ['无主之地', '前任留下的', '活物', '代价交换'] },
+        { key: 'trap', title: '主角处境', q: '他怎么进来的？', options: ['误入', '被选中', '自愿调查', '替人顶替'] }
+    ],
+    '游戏竞技': [
+        { key: 'game', title: '竞技项目', q: '打什么？', options: ['电竞', '全息游戏', '现实副本', '老游戏复活'] },
+        { key: 'team', title: '主角位置', q: '在队里是什么角色？', options: ['队长', '替补', '单人', '教练'] }
+    ]
+};
+
+const REPLAN_PICKS = ['世界观', '金手指', '主角设定', '对手', '开篇'];
+
+let guideAdjustState = null;
+
+// 总览卡片上点「调整设定」：先问哪不满意，而不是让人去角色卡逐页改
+function guideAdjustOpen(novelId) {
+    guideAdjustState = { novelId, picks: new Set(), mode: 'pick' };
+    // 从总览卡片点进来时对话里已有内容，但如果是直接调用，先把空态入口藏掉
+    const actionList = document.querySelector('.chat-action-list');
+    if (actionList) actionList.style.display = 'none';
+    guideRenderAdjustCard();
+}
+
+function guideRenderAdjustCard() {
+    const st = guideAdjustState;
+    const slot = document.getElementById('guide-card-slot');
+    if (!st || !slot) return;
+    guideSetComposerVisible(false);
+
+    slot.innerHTML = '<div class="guide-card">'
+        + '<div class="guide-card-head"><span class="guide-step">调整</span>'
+        + '<span class="guide-head">哪里不满意</span></div>'
+        + '<div class="guide-q">可以多选。选完我会判断是改细节，还是换个故事重来。</div>'
+        + '<div class="guide-chips">'
+        + ['世界观', '金手指', '主角设定', '对手', '开篇', '书名'].map(x =>
+            '<button class="guide-chip" data-adjust="' + x + '" onclick="guideAdjustToggle(this)">' + x + '</button>'
+        ).join('')
+        + '</div>'
+        + '<input class="guide-custom" id="guide-adjust-custom"'
+        + ' placeholder="或者直接说，比如「换成 2010 年代，带着 AI 穿越回去」">'
+        + '<div class="guide-foot">'
+        + '<button class="guide-back" onclick="guideAdjustCancel()">取消</button>'
+        + '<button class="guide-next" onclick="guideAdjustSubmit()">提交</button>'
+        + '</div></div>';
+    syncComposerPadding();
+}
+
+function guideAdjustToggle(el) {
+    if (!guideAdjustState) return;
+    const k = el.dataset.adjust;
+    if (guideAdjustState.picks.has(k)) { guideAdjustState.picks.delete(k); el.classList.remove('on'); }
+    else { guideAdjustState.picks.add(k); el.classList.add('on'); }
+}
+
+// 只改书名：最简单的一档，不重规划
+async function showRenameNovelModal(novelId) {
+    const novel = await novelManager.get(novelId);
+    if (!novel) return;
+    createModal('改书名', `
+        <div class="form-group">
+            <label class="form-label">书名</label>
+            <input class="input" id="novel-title-input" value="${escapeAttr(novel.title)}" maxlength="40">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeModal()">取消</button>
+            <button class="btn btn-primary" onclick="renameNovelConfirm('${escapeJs(novelId)}')">保存</button>
+        </div>`).show();
+}
+
+async function renameNovelConfirm(novelId) {
+    const input = document.getElementById('novel-title-input');
+    const v = ((input && input.value) || '').trim();
+    if (!v) { ui.showToast('书名不能为空'); return; }
+    try {
+        const n = await novelManager.get(novelId);
+        if (!n) return;
+        n.title = v;
+        await novelManager.update(n);
+        closeModal();
+        ui.showToast('已改名');
+        if (store.currentPage === 'novelDetail') navigateTo('novelDetail', { novelId }, true);
+        else if (store.currentPage === 'bookshelf') navigateTo('bookshelf', {}, true);
+    } catch (e) {
+        ui.showToast('改名失败：' + e.message);
+    }
+}
+
+function guideAdjustCancel() {
+    guideAdjustState = null;
+    const slot = document.getElementById('guide-card-slot');
+    if (slot) slot.innerHTML = '';
+    guideSetComposerVisible(true);
+}
+
+// 判断这是「改细节」还是「换故事」。
+// 规则简单但够用：只点书名 = 改名；点到地基项或话里有"换/改成/不要" = 重来。
+function guideDetectScope(picks, custom) {
+    const t = String(custom || '');
+    if (/换|改成|不要|不想|重来|另起|重新/.test(t)) return 'replan';
+    if (picks.some(p => REPLAN_PICKS.includes(p))) return 'replan';
+    if (picks.length === 1 && picks[0] === '书名') return 'rename';
+    return 'local';
+}
+
+async function guideAdjustSubmit() {
+    const st = guideAdjustState;
+    if (!st) return;
+    const picks = Array.from(st.picks);
+    const customEl = document.getElementById('guide-adjust-custom');
+    const custom = customEl ? customEl.value.trim() : '';
+    if (!picks.length && !custom) { ui.showToast('选一项，或者直接说哪里不对'); return; }
+
+    const novel = await novelManager.get(st.novelId);
+    if (!novel) { ui.showToast('作品不见了'); return; }
+    const scope = guideDetectScope(picks, custom);
+
+    if (scope === 'rename') {
+        guideAdjustCancel();
+        showRenameNovelModal(st.novelId);
+        return;
+    }
+
+    if (scope === 'local') {
+        guideAdjustCancel();
+        ui.showToast('这类改动建议用「一致性检查」里的批量替换，会同步改到每一章', 4000);
+        navigateTo('consistencyCheck', { novelId: st.novelId });
+        return;
+    }
+
+    // 换故事：已经写了正文就不能直接覆盖，否则几万字全悬空
+    if ((novel.chapterCount || 0) > 0) {
+        guideAdjustCancel();
+        const ok = confirm('这本已经写了 ' + novel.chapterCount + ' 章正文。\n\n'
+            + '换方向会让已有正文和新设定对不上。建议另存一本新书来试这个方向，原书保持不动。\n\n'
+            + '点「确定」另存新书，点「取消」先导出备份。');
+        if (ok) startReplanGuide(null, novel);
+        else exportSettingDoc(st.novelId);
+        return;
+    }
+
+    guideAdjustCancel();
+    startReplanGuide(st.novelId, novel);
+}
+
+// 重规划：只问最少的几件事——新题材、风格、以及该题材的两个关键分岔口
+let replanState = null;
+
+function startReplanGuide(targetNovelId, novel) {
+    const genre = (novel && novel.genre) || '';
+    const keys = TOPIC_KEYS[genre] || [];
+    replanState = {
+        targetNovelId,          // null = 另存新书
+        sourceNovel: novel || null,
+        step: 0,
+        picks: { genre, style: (novel && novel.style) || '' },
+        topicKeys: keys,
+        topicAnswers: {}
+    };
+    // 题材变了要重算关键点，所以进第一步就重新取
+    guideRenderReplanStep();
+}
+
+function replanSteps() {
+    const st = replanState;
+    const keys = TOPIC_KEYS[st.picks.genre] || [];
+    st.topicKeys = keys;
+    return keys.length;   // 关键点题数（0-2）
+}
+
+function guideRenderReplanStep() {
+    const st = replanState;
+    const slot = document.getElementById('guide-card-slot');
+    if (!st || !slot) return;
+    guideSetComposerVisible(false);
+
+    const extra = replanSteps();
+    const total = 2 + extra;              // 题材 + 风格 + 关键点
+    const n = st.step + 1;
+    let head = '', question = '', body = '';
+
+    if (st.step === 0) {
+        head = '新方向';
+        question = '换到哪一类？';
+        body = '<div class="guide-chips">' + Object.keys(TOPIC_KEYS).map(g =>
+            '<button class="guide-chip' + (st.picks.genre === g ? ' on' : '') + '"'
+            + ' data-guide-chip="genre" data-value="' + escapeAttr(g) + '"'
+            + ' onclick="guidePick(\'genre\', \'' + escapeJs(g) + '\')">' + escapeHtml(g) + '</button>'
+        ).join('') + '</div>';
+    } else if (st.step === 1) {
+        head = '风格';
+        question = '这次想写成什么味道？';
+        body = '<div class="guide-chips">' + GUIDE_STYLES.map(g =>
+            '<button class="guide-chip' + (st.picks.style === g ? ' on' : '') + '"'
+            + ' data-guide-chip="style" data-value="' + escapeAttr(g) + '"'
+            + ' onclick="guidePick(\'style\', \'' + escapeJs(g) + '\')">' + escapeHtml(g) + '</button>'
+        ).join('') + '</div>';
+    } else {
+        const k = st.topicKeys[st.step - 2];
+        if (!k) { guideReplanGenerate(); return; }
+        head = k.title;
+        question = k.q;
+        body = '<div class="guide-chips">' + k.options.map(o =>
+            '<button class="guide-chip' + (st.topicAnswers[k.key] === o ? ' on' : '') + '"'
+            + ' data-guide-chip="' + escapeJs(k.key) + '" data-value="' + escapeAttr(o) + '"'
+            + ' onclick="replanPick(\'' + escapeJs(k.key) + '\', \'' + escapeJs(o) + '\')">' + escapeHtml(o) + '</button>'
+        ).join('') + '</div>';
+    }
+
+    slot.innerHTML = '<div class="guide-card">'
+        + '<div class="guide-card-head"><span class="guide-step">' + n + '/' + total + '</span>'
+        + '<span class="guide-head">' + head + '</span></div>'
+        + '<div class="guide-q">' + question + '</div>'
+        + body
+        + '<div class="guide-foot">'
+        + '<button class="guide-back"' + (n === 1 ? ' disabled' : '') + ' onclick="replanBack()">上一题</button>'
+        + '<button class="guide-next" onclick="replanNext()">'
+        + (n === total ? '重新搭' : '下一题') + '</button>'
+        + '</div></div>';
+    syncComposerPadding();
+}
+
+function replanPick(key, value) {
+    const st = replanState;
+    if (!st) return;
+    st.topicAnswers[key] = value;
+    // 关键点用 key 区分，和题材/风格这两步的 data-guide-chip 不冲突
+    if (key === 'genre') st.picks.genre = value;
+    if (key === 'style') st.picks.style = value;
+    document.querySelectorAll('[data-guide-chip="' + key + '"]').forEach(el => {
+        el.classList.toggle('on', el.dataset.value === value);
+    });
+}
+
+function replanBack() {
+    const st = replanState;
+    if (!st || st.step === 0) return;
+    st.step--;
+    guideRenderReplanStep();
+}
+
+async function replanNext() {
+    const st = replanState;
+    if (!st) return;
+    if (st.step === 0 && !st.picks.genre) { ui.showToast('选一个题材'); return; }
+    if (st.step === 1 && !st.picks.style) { ui.showToast('选一个风格'); return; }
+    if (st.step >= 2) {
+        const k = st.topicKeys[st.step - 2];
+        if (k && !st.topicAnswers[k.key]) { ui.showToast('选一个，或者先不选也行'); }
+    }
+    st.step++;
+    const total = 2 + (TOPIC_KEYS[st.picks.genre] || []).length;
+    if (st.step >= total) { await guideReplanGenerate(); return; }
+    guideRenderReplanStep();
+}
+
+async function guideReplanGenerate() {
+    const st = replanState;
+    if (!st) return;
+    const slot = document.getElementById('guide-card-slot');
+    if (slot) slot.innerHTML = '';
+    guideSetComposerVisible(true);
+    guideSetBusy('按新方向重新搭…');
+
+    const kp = st.topicKeys.map(k =>
+        st.topicAnswers[k.key] ? k.title + '：' + st.topicAnswers[k.key] : ''
+    ).filter(Boolean).join('\n');
+
+    const prompt = '请为一部' + st.picks.genre + '小说重新搭一套骨架。\n\n'
+        + '题材：' + st.picks.genre + '\n风格：' + st.picks.style + '\n'
+        + (kp ? '作者已定的关键点：\n' + kp + '\n' : '')
+        + (st.sourceNovel && st.sourceNovel.idea ? '原来的想法（可以沿用或改写）：' + st.sourceNovel.idea + '\n' : '')
+        + `\n要求：
+1. 大纲 12-15 章，每章写清「发生了什么变化」。
+2. 角色 3-5 个，主角有具体身份、想要什么、被什么困住。
+3. 世界观 2-3 条会影响剧情的规则。
+4. highlights 6 条，行名按题材决定。
+5. 书名给 1 个最合适的（这次换方向了，旧书名不再适用）。
+6. opening：第一章开篇建议，120 字以内，不写正文。
+
+只输出 JSON，不要 markdown 代码块：
+{
+  "title": "书名",
+  "outline": [{"chapter": 1, "title": "章名", "summary": "本章变化"}],
+  "characters": [{"name": "", "role": "主角", "description": ""}],
+  "worldbuilding": "",
+  "synopsis": "",
+  "highlights": [{"label": "", "value": ""}],
+  "opening": ""
+}`;
+
+    let plan = null;
+    try {
+        const raw = await ai.chat([
+            { role: 'system', content: '你是网文策划编辑，产出要具体到能直接开写。' },
+            { role: 'user', content: prompt }
+        ], null, 4000);
+        plan = parseJsonLoose(raw, '{', '}', (v) =>
+            v && typeof v === 'object' && !Array.isArray(v) && 'outline' in v);
+    } catch (_) { plan = null; }
+
+    if (!plan || !Array.isArray(plan.outline) || !plan.outline.length) {
+        guideSetBusy('');
+        addChatMessage('ai', '这次没搭出来（网络或返回格式的问题）。原设定没动，可以再试一次。', []);
+        return;
+    }
+
+    guideSetBusy('正在保存…');
+    try {
+        const saved = await guideApplyReplan(st, plan);
+        guideSetBusy('');
+        guidePushHtml(renderSettingSummary(plan, { title: saved.title, genre: st.picks.genre, style: st.picks.style }, saved.id));
+        addChatMessage('ai', '已经按新方向重搭好了。旧的大纲、角色、世界观都换掉了，正文没动。', []);
+        const box = document.getElementById('chat-messages');
+        if (box) {
+            const d = document.createElement('div');
+            d.className = 'msg-row ai guide-stack';
+            d.innerHTML = '<div class="guide-actions">'
+                + '<button class="guide-act primary" onclick="guideStartWriting(\'' + escapeJs(saved.id) + '\')">'
+                + (plan.opening ? '按这个写第一章' : '直接写第一章') + '</button>'
+                + '<button class="guide-act" onclick="guideOpenDetail(\'' + escapeJs(saved.id) + '\')">查看作品</button>'
+                + '</div>';
+            box.appendChild(d);
+        }
+        syncComposerPadding();
+        const sc = document.querySelector('.chat-scroll');
+        if (sc) sc.scrollTop = sc.scrollHeight;
+    } catch (e) {
+        guideSetBusy('');
+        addChatMessage('ai', '保存失败：' + e.message, []);
+    }
+}
+
+// 覆盖原书（无正文时），或另存一本新书（有正文时）
+async function guideApplyReplan(st, plan) {
+    let novel;
+    if (st.targetNovelId) {
+        novel = await novelManager.get(st.targetNovelId);
+    } else {
+        novel = await novelManager.create(plan.title || '未命名', plan.synopsis || '', st.picks.genre);
+    }
+
+    novel.title = plan.title || novel.title;
+    novel.genre = st.picks.genre;
+    novel.style = st.picks.style;
+    novel.description = plan.synopsis || '';
+    novel.highlights = Array.isArray(plan.highlights) ? plan.highlights.slice(0, 10) : [];
+    novel.opening = String(plan.opening || '');
+    novel.outline = Array.isArray(plan.outline) ? plan.outline : [];
+    await novelManager.update(novel);
+
+    // 角色和世界观整批换掉：旧的是按旧方向编的，留着只会打架
+    const olds = await novelManager.listCharacters(novel.id).catch(() => []);
+    for (const c of olds) await db.delete('characters', c.id).catch(() => {});
+    const oldWb = await novelManager.listWorldbuilding(novel.id).catch(() => []);
+    for (const w of oldWb) await db.delete('worldbuilding', w.id).catch(() => {});
+
+    for (const c of (plan.characters || [])) {
+        if (!c || !c.name) continue;
+        try {
+            await novelManager.createCharacter(novel.id, {
+                name: c.name, role: c.role || '',
+                description: c.description || '', personality: c.description || ''
+            });
+        } catch (_) {}
+    }
+    if (plan.worldbuilding) {
+        try {
+            await novelManager.createWorldbuilding(novel.id, {
+                title: '世界观', category: 'other', content: String(plan.worldbuilding)
+            });
+        } catch (_) {}
+    }
+    return novel;
 }
 
 // 导出 Markdown：把总览、角色、世界观、大纲合成一份，等价于别人的「小说资料/」文件夹
