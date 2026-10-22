@@ -1805,6 +1805,57 @@ async function renderChat(container) {
     `;
     renderChatNovelCtx();
     syncComposerPadding();
+    // 把上一次的对话填回来。旧实现只渲染欢迎页，历史只有在抽屉里点会话时才加载，
+    // 所以切到别的页面再回来（或重开 App），刚聊的内容看起来就"没了"——
+    // 其实一条都没丢，全在 IndexedDB 的 messages 表里。
+    restoreChatSession(container);
+}
+
+// 会话 id 持久化：store 是内存对象，重开 App 会回到默认的 'main'，
+// 而用户实际在用的可能是 chat_1758... 那个会话，于是重启后看见的是空的 main。
+const CHAT_SESSION_KEY = 'ow_chat_session';
+function rememberChatSession(sid) {
+    store.currentSessionId = sid;
+    try { localStorage.setItem(CHAT_SESSION_KEY, sid); } catch (_) {}
+}
+function restoreChatSessionId() {
+    try {
+        const saved = localStorage.getItem(CHAT_SESSION_KEY);
+        if (saved) store.currentSessionId = saved;
+    } catch (_) {}
+}
+
+// 把消息画进聊天区（隐藏欢迎页与快捷卡片）
+function paintChatMessages(container, msgs) {
+    if (!container) return;
+    store.chatMessages = msgs;
+    const hero = container.querySelector('.chat-hero');
+    const actionList = container.querySelector('.chat-action-list');
+    const messagesBox = container.querySelector('#chat-messages');
+    if (hero) hero.style.display = 'none';
+    if (actionList) actionList.style.display = 'none';
+    if (!messagesBox) return;
+    messagesBox.style.display = 'flex';
+    messagesBox.innerHTML = msgs.map(m => `
+        <div class="msg-row ${m.role}">
+            <div class="msg-bubble ${m.role}">${escapeHtml(m.content).replace(/\n/g, '<br>')}</div>
+        </div>
+    `).join('');
+    messagesBox.scrollTop = messagesBox.scrollHeight;
+}
+
+async function restoreChatSession(container) {
+    const sid = store.currentSessionId || 'main';
+    let msgs = [];
+    try {
+        msgs = await db.getAll('messages', 'sessionId', sid);
+    } catch (e) {
+        return;
+    }
+    if (!msgs || !msgs.length) return;
+    // 等待期间用户可能已经切走了，别往旧页面里画
+    if (store.currentPage !== 'chat') return;
+    paintChatMessages(container, msgs.sort((a, b) => (a.created || 0) - (b.created || 0)));
 }
 
 // 输入框是 fixed 的，内容区要按它的真实高度留白，否则最后一条消息会被压住
@@ -2019,6 +2070,9 @@ async function sendMessage() {
     // 续写类短指令（继续 / 好的 / 嗯）拿去搜网只会搜回噪音，还白花一次搜索钱，直接跳过。
     const isContinuation = /^(继续(写|吧)?|接着(写|来)?|好(的|吧)?|嗯|可以|谢谢|再来(一段|一章)?|下一段|下一章|往下写|就这样)[吧呢啊呀。！!，,～~…\s]*$/.test(text.trim());
     let webHits = [];
+    // 联网失败时留个痕。以前只弹一个 4.5 秒的 toast，手机上经常没看见，
+    // 用户以为联网生效了，其实这一条是按普通对话答的。改成在消息流里可见。
+    let webSearchError = '';
     if (store.webSearchOn && isContinuation) {
         ui.showToast('续写指令：跳过联网检索（省一次搜索）', 2500);
     } else if (store.webSearchOn) {
@@ -2033,7 +2087,8 @@ async function sendMessage() {
                 renderWebSearchBtn();
             }
         } catch (e) {
-            ui.showToast('联网检索失败，本条按普通对话回答：' + e.message, 4500);
+            webSearchError = (e && e.message) || String(e);
+            ui.showToast('联网检索失败，本条按普通对话回答：' + webSearchError, 4500);
         }
         aiLoading.innerHTML = `<div class="msg-bubble ai loading">AI 思考中<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span></div>`;
     }
@@ -2077,6 +2132,9 @@ async function sendMessage() {
             const sites = webHits.slice(0, 3).map(h => escapeHtml(h.site || h.title || '来源')).join('、');
             aiLoading.insertAdjacentHTML('afterend',
                 `<div class="web-src">已联网检索 ${webHits.length} 条：${sites}${webHits.length > 3 ? ' 等' : ''}</div>`);
+        } else if (webSearchError) {
+            aiLoading.insertAdjacentHTML('afterend',
+                `<div class="web-src web-src-warn">本条未联网：${escapeHtml(String(webSearchError).slice(0, 140))}</div>`);
         }
 
         // 保存消息（去掉设定块，保留干净正文）
@@ -5304,6 +5362,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     await checkBackupReminder();
 
     // Default to chat page (matching competitor)
+    // 先恢复上次在聊的会话，再进聊天页——否则重开 App 会把 currentSessionId 重置成 'main'，
+    // 用户看到的是一个空会话，之前那段对话就像被清掉了
+    restoreChatSessionId();
     navigateTo('chat');
 
     // 恢复上次的联网开关
@@ -5836,7 +5897,7 @@ async function renderChatDrawer() {
 }
 
 function startNewChatSession() {
-    store.currentSessionId = 'chat_' + Date.now();
+    rememberChatSession('chat_' + Date.now());
     store.chatMessages = [];
     store.activeChatSkill = null;
     closeChatDrawer();
@@ -5844,33 +5905,15 @@ function startNewChatSession() {
 }
 
 async function switchChatSession(sessionId) {
-    store.currentSessionId = sessionId;
+    rememberChatSession(sessionId);
     closeChatDrawer();
     navigateTo('chat');
-    
-    // 加载该会话的消息
+
+    // 加载该会话的消息（渲染逻辑与 renderChat 的自动恢复共用 paintChatMessages）
     try {
         const msgs = await db.getAll('messages', 'sessionId', sessionId);
-        store.chatMessages = msgs.sort((a, b) => (a.created || 0) - (b.created || 0));
-        
-        // 更新UI显示消息
-        const container = document.getElementById('page-chat');
-        if (container) {
-            // 隐藏hero和卡片，显示消息
-            const hero = container.querySelector('.chat-hero');
-            const actionList = container.querySelector('.chat-action-list');
-            const messagesBox = container.querySelector('#chat-messages');
-            if (hero) hero.style.display = 'none';
-            if (actionList) actionList.style.display = 'none';
-            if (messagesBox) {
-                messagesBox.style.display = 'flex';
-                messagesBox.innerHTML = store.chatMessages.map(m => `
-                    <div class="msg-row ${m.role}">
-                        <div class="msg-bubble ${m.role}">${escapeHtml(m.content).replace(/\n/g, '<br>')}</div>
-                    </div>
-                `).join('');
-            }
-        }
+        if (store.currentPage !== 'chat') return;
+        paintChatMessages(document.getElementById('page-chat'), msgs.sort((a, b) => (a.created || 0) - (b.created || 0)));
     } catch (e) {
         console.error('加载会话失败:', e);
     }
@@ -5887,7 +5930,7 @@ async function deleteChatSession(sessionId) {
         
         // 如果删除的是当前会话，重置
         if (store.currentSessionId === sessionId) {
-            store.currentSessionId = 'chat_' + Date.now();
+            rememberChatSession('chat_' + Date.now());
             store.chatMessages = [];
         }
         
