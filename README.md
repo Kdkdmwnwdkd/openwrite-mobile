@@ -134,7 +134,7 @@ openwrite-mobile/
 └── LICENSE            # Apache-2.0
 ```
 
-`backend/` 目录为早期 FastAPI 桥接层的历史遗留，当前版本前端不依赖它，不再维护。
+`backend/`（早期 FastAPI 桥接层）已于 v2.18.7 移除：它依赖一个仓库内并不存在的 `../../Openwrite` 目录，前端也从未调用过任何一个接口，留着只会让新贡献者以为需要起后端。
 
 ## 与原版 OpenWrite 的关系
 

@@ -531,40 +531,59 @@ const ai = {
         };
         if (opts && opts.searchPayload) Object.assign(body, opts.searchPayload);
 
-        // 超时保护。旧实现完全裸奔：服务商连接挂死时界面永远转圈，只能杀进程重开。
-        // 这里用空闲超时 + 外部取消信号（用户点「停止」）合并成一个 controller。
-        const ctrl = new AbortController();
+        // 超时 + 重试。
+        // 超时用「空闲超时」：每收到一段数据就重置计时，长章节慢慢吐字不会被误杀。
+        // 重试只覆盖「还没开始读流」的阶段（网络抖动 / 5xx），此时重发不会重复输出；
+        // 429 是限流/计费语义，重试只会更糟；流式一旦开始读就不能重试，否则正文会重复。
+        const MAX_ATTEMPTS = 2;
+        let ctrl = null;
         let watchdog = null;
         const armWatchdog = () => {
             if (watchdog) clearTimeout(watchdog);
             watchdog = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, AI_IDLE_TIMEOUT);
         };
-        if (signal) {
-            if (signal.aborted) ctrl.abort();
-            else signal.addEventListener('abort', () => { try { ctrl.abort(); } catch (_) {} }, { once: true });
-        }
+        const stopWatchdog = () => { if (watchdog) { clearTimeout(watchdog); watchdog = null; } };
 
-        let response;
-        armWatchdog();
-        try {
-            response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${config.apiKey}`
-                },
-                body: JSON.stringify(body),
-                signal: ctrl.signal
-            });
-        } catch (e) {
-            if (watchdog) { clearTimeout(watchdog); watchdog = null; }
-            // 外部取消优先报「已取消」，别把用户主动停止说成超时
-            if (signal && signal.aborted) throw new Error('已取消');
-            if (ctrl.signal.aborted) throw new Error(`请求超时（${AI_IDLE_TIMEOUT / 1000} 秒无响应），请检查网络或 Base URL`);
-            throw new Error('网络请求失败：' + (e && e.message ? e.message : '未知错误'));
+        let response = null;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            ctrl = new AbortController();
+            if (signal) {
+                if (signal.aborted) ctrl.abort();
+                else signal.addEventListener('abort', () => { try { ctrl.abort(); } catch (_) {} }, { once: true });
+            }
+            armWatchdog();
+            try {
+                response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${config.apiKey}`
+                    },
+                    body: JSON.stringify(body),
+                    signal: ctrl.signal
+                });
+            } catch (e) {
+                stopWatchdog();
+                // 外部取消优先报「已取消」，别把用户主动停止说成超时
+                if (signal && signal.aborted) throw new Error('已取消');
+                if (ctrl.signal.aborted) throw new Error(`请求超时（${AI_IDLE_TIMEOUT / 1000} 秒无响应），请检查网络或 Base URL`);
+                if (attempt < MAX_ATTEMPTS) {
+                    await new Promise(r => setTimeout(r, 700));
+                    continue;
+                }
+                throw new Error('网络请求失败：' + (e && e.message ? e.message : '未知错误'));
+            }
+            // 5xx 是服务端临时故障，重发一次通常就好；429 / 4xx 不重试
+            if (response.status >= 500 && attempt < MAX_ATTEMPTS) {
+                stopWatchdog();
+                try { if (response.body) await response.body.cancel(); } catch (_) {}
+                await new Promise(r => setTimeout(r, 800));
+                continue;
+            }
+            break;
         }
         // 非流式到这里响应已完整，不用再等
-        if (!onStream && watchdog) { clearTimeout(watchdog); watchdog = null; }
+        if (!onStream) stopWatchdog();
 
         if (!response.ok) {
             const raw = await response.text().catch(() => '');
@@ -1023,17 +1042,33 @@ const novelManager = {
         const delta = content.length - prevWords;
         if (delta > 0) addTodayWords(delta).catch(() => {});
 
-        // Update novel stats
+        // 更新作品统计：这里必须走增量，不能每次重算。
+        // 自动保存是 1 秒防抖的高频路径，旧实现每次都 listChapters 全量读 + 整条 novel 重写，
+        // 千章长篇上每敲一下就是上千条记录读一次，手机端会明显掉帧。
+        // 代价是统计值可能因异常退出而漂移，所以删章/重排/导入这类批量操作后会调
+        // recountNovelStats 全量校准一次（见 deleteChapter）。
         const novel = await this.get(novelId);
         if (novel) {
-            const chapters = await this.listChapters(novelId);
-            novel.chapterCount = chapters.length;
-            novel.wordCount = chapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0);
+            const deltaWords = content.length - prevWords;
+            novel.wordCount = Math.max(0, (novel.wordCount || 0) + deltaWords);
+            if (!existing) novel.chapterCount = (novel.chapterCount || 0) + 1;
             novel.updated = Date.now();
             await db.put('novels', novel);
         }
 
         return chapter;
+    },
+
+    // 作品统计的真相来源：整本重算。只在批量操作后调用，日常保存走增量。
+    async recountNovelStats(novelId) {
+        const novel = await this.get(novelId);
+        if (!novel) return null;
+        const chapters = await this.listChapters(novelId);
+        novel.chapterCount = chapters.length;
+        novel.wordCount = chapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0);
+        novel.updated = Date.now();
+        await db.put('novels', novel);
+        return novel;
     },
 
     async deleteChapter(novelId, chapterNum) {
@@ -1044,14 +1079,8 @@ const novelManager = {
 
         // 同步作品统计。删章以前只删记录，chapterCount / wordCount 还留着旧值，
         // 书架上的「共 N 章 · X 万字」会一直虚高，导入的旧稿删掉几章后尤其明显。
-        const novel = await this.get(novelId);
-        if (novel) {
-            const chapters = await this.listChapters(novelId);
-            novel.chapterCount = chapters.length;
-            novel.wordCount = chapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0);
-            novel.updated = Date.now();
-            await db.put('novels', novel);
-        }
+        // 这里走全量校准（批量操作后的一次性修复），不用增量以免误差累积。
+        await this.recountNovelStats(novelId);
     },
 
     // ===== 分卷（v2.10.1）=====
@@ -1536,6 +1565,13 @@ const ui = {
 let pageHistory = [];
 let __suppressHistoryPush = false;   // 返回操作本身不再入栈
 
+// 是否运行在 Capacitor 原生壳里。原生壳的返回键由 backButton 事件接管，
+// 浏览器/PWA 没有这套东西，只能靠 history + popstate。
+function isNativeApp() {
+    const C = window.Capacitor;
+    return !!(C && typeof C.isNativePlatform === 'function' && C.isNativePlatform());
+}
+
 function navigateTo(page, params = {}, isRootTab = false) {
     // 离开编辑器时退出专注，否则回来还是全屏状态
     if (store.currentPage === 'chapterEdit' && page !== 'chapterEdit') {
@@ -1558,8 +1594,14 @@ function navigateTo(page, params = {}, isRootTab = false) {
     if (!isRootTab && !__suppressHistoryPush) {
         // 连参数一起存，否则返回详情页会丢 novelId 变成白屏
         pageHistory.push({ page: store.currentPage, params: store.currentParams || {} });
+        // 让浏览器历史跟着一起长：否则 Web 端的系统返回键/手势会直接退出应用，
+        // 而页面栈里其实还有上一页。pushState 的条目数与 pageHistory 严格一一对应。
+        // 原生壳里不做：那边的返回键由 Capacitor backButton 接管，两套历史同时存在会双退。
+        if (!isNativeApp()) { try { history.pushState({ owNav: page }, ''); } catch (_) {} }
     } else if (isRootTab) {
         pageHistory = [];
+        // 切底部 tab 视为回到根：替换当前条目而不是新增，避免历史越积越深
+        if (!isNativeApp()) { try { history.replaceState({ owRoot: page }, ''); } catch (_) {} }
     }
     __suppressHistoryPush = false;
 
@@ -1628,7 +1670,7 @@ function navigateTo(page, params = {}, isRootTab = false) {
         worldview: (view) => renderWorldView(view, params.novelId),
         worldviewEdit: (view) => renderWorldviewEdit(view, params.novelId, params.worldviewId),
         // 分段编辑（自身按 page id 取容器）
-        paragraphEdit: () => renderParagraphEdit(params.novelId, params.chapterNum),
+        paragraphEdit: (view) => renderParagraphEdit(params.novelId, params.chapterNum, view),
         // 多Agent协作
         agentStudio: (view) => renderAgentStudio(view, params.novelId),
         // 一致性检查
@@ -3024,10 +3066,26 @@ async function doImport(fallbackTitle) {
         }
         const existing = await novelManager.listChapters(novelId);
         let num = existing.length;
+        // 直接批量落库 + 最后一次性校准统计，不逐章调 saveChapter：
+        // saveChapter 每章都要读一次 novel 再写回（导入 500 章就是 500 次额外读写），
+        // 而且它会调 addTodayWords——把几十万字的历史旧稿记成"今日新增"，
+        // 今日进度条会当场撑爆。导入不是写作，本来就不该计入今日字数。
+        const now = Date.now();
         for (const ch of chapters) {
             num += 1;
-            await novelManager.saveChapter(novelId, num, ch.title, ch.content, null, { archive: false });
+            const content = ch.content || '';
+            await db.put('chapters', {
+                id: `${novelId}_ch${num}`,
+                novelId,
+                number: num,
+                title: ch.title || `第${num}章`,
+                content,
+                wordCount: content.length,
+                created: now,
+                updated: now
+            });
         }
+        await novelManager.recountNovelStats(novelId);
         window.__importChapters = null;
         closeModal();
         ui.showToast(`已导入 ${chapters.length} 章，共 ${chapters.reduce((s,c)=>s+c.content.length,0).toLocaleString()} 字`, 4000);
@@ -5165,6 +5223,12 @@ document.addEventListener('DOMContentLoaded', () => {
 const ROOT_PAGES = ['chat', 'bookshelf', 'settings'];
 
 function goBack(fallback = 'bookshelf') {
+    // Web/PWA：页面栈与浏览器历史同步维护（见 navigateTo），有历史就交给 history.back()，
+    // 由 popstate 统一处理；否则两条栈会各退一次，点一次回到两页之前。
+    // 原生壳：返回键由 backButton 接管，这里保持原来的手写回退，避免双退。
+    if (!isNativeApp() && pageHistory.length > 0) {
+        try { history.back(); return; } catch (_) { /* 不支持时退回下面的手写逻辑 */ }
+    }
     const prev = pageHistory.pop();
     if (!prev || !prev.page) {
         if (store.currentPage !== fallback) navigateTo(fallback, {}, true);
@@ -5174,6 +5238,20 @@ function goBack(fallback = 'bookshelf') {
     __suppressHistoryPush = !isRoot;
     navigateTo(prev.page, prev.params || {}, isRoot);
 }
+
+// Web 端（浏览器 / PWA）的系统返回键与侧滑手势：浏览器已经退掉一条历史，
+// 这里把它翻译成页面栈的一次回退。注意不能再 pushState，否则会立刻把用户顶回去。
+window.addEventListener('popstate', () => {
+    if (isNativeApp()) return;
+    const prev = pageHistory.pop();
+    if (!prev || !prev.page) {
+        // 已经退到应用的第一条历史，再退就该离开页面了——不拦，让浏览器自己处理
+        __suppressHistoryPush = false;
+        return;
+    }
+    __suppressHistoryPush = true;
+    navigateTo(prev.page, prev.params || {}, ROOT_PAGES.includes(prev.page));
+});
 
 function initNativeShell() {
     const C = window.Capacitor;
@@ -5829,9 +5907,9 @@ const MEMO_CATEGORIES = [
 ];
 
 async function showMemo() {
-    const container = document.getElementById('page-chat');
-    if (!container) return;
-    
+    // 以前这里强制要求页面里存在 #page-chat，不存在就直接 return ——
+    // 从设置页、书架点「备忘录」时表现就是「点了没反应」。备忘录是全局功能，
+    // 弹窗渲染在 modal 层，跟当前在哪个页面无关。
     const memos = await db.getAll('memos') || [];
     const currentCategory = store.memoCategory || 'default';
     const filtered = memos.filter(m => m.category === currentCategory).sort((a, b) => (b.updated || 0) - (a.updated || 0));
@@ -6383,9 +6461,17 @@ async function applyConflictSync(novelId) {
             }
         }
         if (hasChange) {
-            await novelManager.saveChapter(novelId, ch.number, ch.title, newContent);
+            // 批量同步不逐章走 saveChapter：它每次都重算作品统计（O(n) 读 + 整条 novel 重写），
+            // 而且会在覆盖前归档旧版本——一次同步几十章就等于塞几十份全文快照进 IndexedDB。
+            await db.put('chapters', Object.assign({}, ch, {
+                content: newContent,
+                wordCount: newContent.length,
+                updated: Date.now()
+            }));
         }
     }
+
+    if (replacedCount) await novelManager.recountNovelStats(novelId);
 
     // 保存大纲
     await novelManager.saveOutline(novelId, outline);
@@ -7373,8 +7459,10 @@ function paragraphsToContent(paragraphs) {
     return paragraphs.map(p => p.content).join('\n\n');
 }
 
-async function renderParagraphEdit(novelId, chapterNum) {
-    const view = document.getElementById('page-paragraphEdit');
+// 第三个参数是页面容器，由路由表传入；其他调用点（保存后重渲染）不传，
+// 退回自己按 id 取，保持向后兼容。
+async function renderParagraphEdit(novelId, chapterNum, container = null) {
+    const view = container || document.getElementById('page-paragraphEdit');
     if (!view) return;
     const novel = await novelManager.get(novelId);
     const chapter = await novelManager.getChapter(novelId, chapterNum);
@@ -8342,19 +8430,37 @@ async function consistencyReplaceExecute(novelId, oldText, newText, affected) {
         const chapters = await novelManager.listChapters(novelId);
         let done = 0;
         for (const ch of chapters) {
-            if ((ch.content || '').includes(oldText)) {
-                const newContent = ch.content.split(oldText).join(newText);
-                await novelManager.saveChapter(novelId, ch.number, ch.title, newContent, ch.paragraphs);
-                done++;
-            }
+            if (!(ch.content || '').includes(oldText)) continue;
+            const newContent = ch.content.split(oldText).join(newText);
+            // 直接写记录，不走 saveChapter：
+            // 1) saveChapter 每次都全量重算作品统计，替换 N 章就是 N 次 O(n) 读 —— 整体 O(n²)；
+            // 2) 它还会在覆盖前归档旧版本，替换 100 章等于把 100 份全文快照塞进 versions 表，
+            //    几十万字的老书一次替换就能吃掉大半配额。
+            await db.put('chapters', Object.assign({}, ch, {
+                content: newContent,
+                wordCount: newContent.length,
+                updated: Date.now()
+            }));
+            done++;
         }
+        if (done) await novelManager.recountNovelStats(novelId);
+
         const box = document.getElementById('consistency-replace-result');
-        box.innerHTML = `<div class="consistency-clean">✅ 替换完成：${done} 个章节已更新</div>`;
+        if (box) box.innerHTML = `<div class="consistency-clean">✅ 替换完成：${done} 个章节已更新</div>`;
         ui.showToast(`已替换 ${done} 章`);
-        document.getElementById('consistency-old').value = '';
-        document.getElementById('consistency-new').value = '';
-        // 刷新实体列表
-        setTimeout(() => location.reload(), 1200);
+        const oldInput = document.getElementById('consistency-old');
+        const newInput = document.getElementById('consistency-new');
+        if (oldInput) oldInput.value = '';
+        if (newInput) newInput.value = '';
+
+        // 刷新实体列表。旧代码是 location.reload()：整页重载会把用户刚看到的
+        // 检查结果、滚动位置全清掉，在 APK 里还会闪一下白屏。
+        // 这里只重渲染当前页，延迟一点让用户先看到"替换完成"。
+        setTimeout(() => {
+            if (store.currentPage !== 'consistencyCheck') return;
+            const view = document.getElementById('page-consistencyCheck');
+            if (view) renderConsistencyCheck(view, novelId);
+        }, 1200);
     } catch (e) {
         ui.showToast('替换失败: ' + e.message);
     }
