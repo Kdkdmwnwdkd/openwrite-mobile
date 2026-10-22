@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.19.1',   // 与 package.json 保持一致
+    VERSION: '2.19.2',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -25,6 +25,17 @@ function detectProvider(model) {
     return 'custom';
 }
 
+// novels 的写入串行化。
+// saveChapter 和 recountNovelStats 都是「读整条 → 改 → 写回」，两章并发保存时
+// 后写的那次会用旧快照覆盖前一次的字数增量；recount 与 saveChapter 交错时同理。
+// 这里把所有 novels 写入排成队列，队列内重新读一次再改。
+let __novelWriteChain = Promise.resolve();
+function withNovelLock(fn) {
+    const run = __novelWriteChain.then(fn, fn);
+    __novelWriteChain = run.catch(() => {});
+    return run;
+}
+
 // ===== IndexedDB Store =====
 const db = {
     // 连接复用。indexedDB.open() 每调用一次都会新建一条连接，而且浏览器不会自动回收，
@@ -39,6 +50,12 @@ const db = {
             request.onerror = () => {
                 this._openPromise = null;
                 reject(request.error);
+            };
+            // 另一个标签页还占着旧版本的连接时，open 会一直 blocked：
+            // 既不 resolve 也不 reject，_openPromise 永久 pending，全站 db 调用静默挂死。
+            request.onblocked = () => {
+                this._openPromise = null;
+                reject(new Error('数据库正被其他页面占用，请关掉其它标签页后重试'));
             };
             request.onsuccess = () => {
                 const database = request.result;
@@ -134,15 +151,22 @@ const db = {
         });
     },
 
+    // 必须等 tx.oncomplete 才算写完。
+    // req.onsuccess 只代表"请求被接受"，配额超限/事务中止发生在提交阶段，
+    // 那时候已经 resolve 了，编辑器会显示"已自动保存"，重开却发现内容没了。
     async put(store, value) {
         if (!value || typeof value !== 'object') throw new Error('写入数据不合法');
         const database = await this.open();
         return new Promise((resolve, reject) => {
             const tx = database.transaction(store, 'readwrite');
             const os = tx.objectStore(store);
+            let result;
             const req = os.put(value);
-            req.onsuccess = () => resolve(req.result);
+            req.onsuccess = () => { result = req.result; };
             req.onerror = () => reject(req.error);
+            tx.oncomplete = () => resolve(result);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error('写入被中止'));
         });
     },
 
@@ -152,9 +176,10 @@ const db = {
         return new Promise((resolve, reject) => {
             const tx = database.transaction(store, 'readwrite');
             const os = tx.objectStore(store);
-            const req = os.delete(key);
-            req.onsuccess = () => resolve();
-            req.onerror = () => reject(req.error);
+            os.delete(key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error('删除被中止'));
         });
     },
 
@@ -504,6 +529,15 @@ async function buildLayeredContext(novelId, chapterNum, hintText = '') {
 // 真正卡住 120 秒才断。
 const AI_IDLE_TIMEOUT = 120000;
 
+// 取消/超时必须带上 name='AbortError'：调用方（AI 写作的「停止并保存已写部分」）
+// 就是靠 err.name 判断该不该保留已生成的部分。只 new Error('已取消') 会被当成
+// 普通失败，用户点了停止反而一个字都不保存。
+function abortError(msg) {
+    const e = new Error(msg);
+    e.name = 'AbortError';
+    return e;
+}
+
 const ai = {
     // opts.searchPayload：由「查资料」模块传入的服务端联网参数（如 enable_search / tools），
     // 不属于 OpenAI 标准字段，只有显式开启联网时才合并进去，避免影响普通请求。
@@ -586,8 +620,8 @@ const ai = {
             } catch (e) {
                 stopWatchdog();
                 // 外部取消优先报「已取消」，别把用户主动停止说成超时
-                if (signal && signal.aborted) throw new Error('已取消');
-                if (ctrl.signal.aborted) throw new Error(`请求超时（${AI_IDLE_TIMEOUT / 1000} 秒无响应），请检查网络或 Base URL`);
+                if (signal && signal.aborted) throw abortError('已取消');
+                if (ctrl.signal.aborted) throw abortError(`请求超时（${AI_IDLE_TIMEOUT / 1000} 秒无响应），请检查网络或 Base URL`);
                 if (attempt < MAX_ATTEMPTS) {
                     await new Promise(r => setTimeout(r, 700));
                     continue;
@@ -661,8 +695,8 @@ const ai = {
                 if (buffer.trim()) handleLine(buffer);
                 return fullContent;
             } catch (e) {
-                if (signal && signal.aborted) throw new Error('已取消');
-                if (ctrl.signal.aborted) throw new Error(`生成超时（${AI_IDLE_TIMEOUT / 1000} 秒没有新数据），已中断`);
+                if (signal && signal.aborted) throw abortError('已取消');
+                if (ctrl.signal.aborted) throw abortError(`生成超时（${AI_IDLE_TIMEOUT / 1000} 秒没有新数据），已中断`);
                 throw e;
             } finally {
                 if (watchdog) { clearTimeout(watchdog); watchdog = null; }
@@ -983,28 +1017,64 @@ ${chapter.content}
     }
 };
 
-// 解析审稿输出。模型有时会包 ```json 代码块或加一句"以下是结果"，
-// 这里都剥掉；解析失败返回 null，由调用方回退成纯文本展示。
-function parseReviewFindings(text) {
-    const raw = String(text || '').trim();
-    if (!raw) return null;
-    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const body = fenced ? fenced[1].trim() : raw;
-    const arrText = body.match(/\[[\s\S]*\]/);
-    if (!arrText) return null;
-    try {
-        const arr = JSON.parse(arrText[0]);
-        if (!Array.isArray(arr)) return null;
-        return arr.filter(x => x && (x.issue || x.quote)).map(x => ({
-            severity: /^S[1-4]$/.test(String(x.severity)) ? String(x.severity) : 'S3',
-            category: String(x.category || 'prose').toLowerCase(),
-            quote: String(x.quote || '').slice(0, 200),
-            issue: String(x.issue || ''),
-            fix: String(x.fix || '')
-        })).sort((a, b) => a.severity.localeCompare(b.severity));
-    } catch (e) {
-        return null;
+// 宽松 JSON 解析。模型常在 JSON 前后加一句"以下是结果"，或包在 ```json 里；
+// 而贪婪匹配 [\s\S]* 会吞到最后一个括号 —— 遇到"说明{...}示例{...}"就解析失败，
+// 白花一次调用却只显示"提取失败"。这里改成逐步降级 + 平衡扫描。
+function parseJsonLoose(text, opener = '{', closer = '}', validate = null) {
+    const body = String(text || '').trim();
+    if (!body) return null;
+    const tryParse = (x) => { try { return JSON.parse(x); } catch (_) { return undefined; } };
+    const ok = (v) => (typeof validate === 'function' ? validate(v) : true);
+
+    let r = tryParse(body);
+    if (r !== undefined && ok(r)) return r;
+
+    const fenced = body.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenced) {
+        r = tryParse(fenced[1].trim());
+        if (r !== undefined && ok(r)) return r;
     }
+
+    // 逐个候选扫描：模型常先给一个"示例格式 {...}"再给真正的结果，
+    // 只取第一个括号块会咬到示例。这里让调用方传 validate，不合格就继续往后找。
+    let pos = 0;
+    while (true) {
+        const start = body.indexOf(opener, pos);
+        if (start === -1) return null;
+        let depth = 0, inStr = false, esc = false, end = -1;
+        for (let i = start; i < body.length; i++) {
+            const ch = body[i];
+            if (inStr) {
+                if (esc) esc = false;
+                else if (ch === '\\') esc = true;
+                else if (ch === '"') inStr = false;
+                continue;
+            }
+            if (ch === '"') { inStr = true; continue; }
+            if (ch === opener) depth++;
+            else if (ch === closer) {
+                depth--;
+                if (depth === 0) { end = i; break; }
+            }
+        }
+        if (end === -1) return null;
+        const out = tryParse(body.slice(start, end + 1));
+        if (out !== undefined && ok(out)) return out;
+        pos = end + 1;
+    }
+}
+
+// 解析审稿输出；解析失败返回 null，由调用方回退成纯文本展示。
+function parseReviewFindings(text) {
+    const arr = parseJsonLoose(text, '[', ']', (v) => Array.isArray(v));
+    if (!Array.isArray(arr)) return null;
+    return arr.filter(x => x && (x.issue || x.quote)).map(x => ({
+        severity: /^S[1-4]$/.test(String(x.severity)) ? String(x.severity) : 'S3',
+        category: String(x.category || 'prose').toLowerCase(),
+        quote: String(x.quote || '').slice(0, 200),
+        issue: String(x.issue || ''),
+        fix: String(x.fix || '')
+    })).sort((a, b) => a.severity.localeCompare(b.severity));
 }
 
 // 把 quote 对回正文的段落号，方便用户回编辑器里找。
@@ -1166,7 +1236,10 @@ const novelManager = {
         if (existing && existing.content && existing.content !== content && opts.archive !== false) {
             await this.archiveChapterVersion(existing);
         }
-        const chapter = {
+        // 保留原记录的所有字段。旧实现是"挑几个字段重建对象"，结果 volumeId（分卷）、
+        // scene（场景卡）、characters 全被丢掉 —— 在编辑器改一个字触发自动保存，
+        // 章节就从分卷里掉出去、场景卡也空了。
+        const chapter = Object.assign({}, existing || {}, {
             id,
             novelId,
             number: chapterNum,
@@ -1176,9 +1249,8 @@ const novelManager = {
             // 保留首次创建时间（旧代码每次保存都重写 created）
             created: existing && existing.created ? existing.created : Date.now(),
             updated: Date.now()
-        };
-        if (existing && existing.summary) chapter.summary = existing.summary;
-        if (existing && existing.hook) chapter.hook = existing.hook;
+        });
+        // paragraphs 只在显式传入时覆盖；传 null 表示"保持原样"
         if (paragraphs !== null) {
             chapter.paragraphs = paragraphs;
         }
@@ -1195,28 +1267,31 @@ const novelManager = {
         // 千章长篇上每敲一下就是上千条记录读一次，手机端会明显掉帧。
         // 代价是统计值可能因异常退出而漂移，所以删章/重排/导入这类批量操作后会调
         // recountNovelStats 全量校准一次（见 deleteChapter）。
-        const novel = await this.get(novelId);
-        if (novel) {
+        await withNovelLock(async () => {
+            const fresh = await this.get(novelId);   // 队列内重读，避免用旧快照覆盖
+            if (!fresh) return;
             const deltaWords = content.length - prevWords;
-            novel.wordCount = Math.max(0, (novel.wordCount || 0) + deltaWords);
-            if (!existing) novel.chapterCount = (novel.chapterCount || 0) + 1;
-            novel.updated = Date.now();
-            await db.put('novels', novel);
-        }
+            fresh.wordCount = Math.max(0, (fresh.wordCount || 0) + deltaWords);
+            if (!existing) fresh.chapterCount = (fresh.chapterCount || 0) + 1;
+            fresh.updated = Date.now();
+            await db.put('novels', fresh);
+        });
 
         return chapter;
     },
 
     // 作品统计的真相来源：整本重算。只在批量操作后调用，日常保存走增量。
     async recountNovelStats(novelId) {
-        const novel = await this.get(novelId);
-        if (!novel) return null;
         const chapters = await this.listChapters(novelId);
-        novel.chapterCount = chapters.length;
-        novel.wordCount = chapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0);
-        novel.updated = Date.now();
-        await db.put('novels', novel);
-        return novel;
+        return await withNovelLock(async () => {
+            const novel = await this.get(novelId);
+            if (!novel) return null;
+            novel.chapterCount = chapters.length;
+            novel.wordCount = chapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0);
+            novel.updated = Date.now();
+            await db.put('novels', novel);
+            return novel;
+        });
     },
 
     async deleteChapter(novelId, chapterNum) {
@@ -1979,17 +2054,23 @@ function paintChatMessages(container, msgs) {
     messagesBox.scrollTop = messagesBox.scrollHeight;
 }
 
+// 每次恢复/切换都自增，回来的结果如果序号过期就丢弃 ——
+// 否则慢请求后返回时，会把上一个会话的消息画到新会话上。
+let __chatRestoreSeq = 0;
+
 async function restoreChatSession(container) {
     const sid = store.currentSessionId || 'main';
+    const seq = ++__chatRestoreSeq;
     let msgs = [];
     try {
         msgs = await db.getAll('messages', 'sessionId', sid);
     } catch (e) {
         return;
     }
+    if (seq !== __chatRestoreSeq) return;          // 已有更新的恢复请求
+    if (store.currentSessionId !== sid) return;    // 期间切了会话
+    if (store.currentPage !== 'chat') return;      // 期间离开了聊天页
     if (!msgs || !msgs.length) return;
-    // 等待期间用户可能已经切走了，别往旧页面里画
-    if (store.currentPage !== 'chat') return;
     paintChatMessages(container, msgs.sort((a, b) => (a.created || 0) - (b.created || 0)));
 }
 
@@ -3273,7 +3354,9 @@ async function doImport(fallbackTitle) {
             novelId = novel.id;
         }
         const existing = await novelManager.listChapters(novelId);
-        let num = existing.length;
+        // 用「最大章号 + 1」而不是「章节条数」：删过中间章之后条数会小于最大章号，
+        // 按条数续号会直接覆盖现存的章节。
+        let num = existing.reduce((m, c) => Math.max(m, Number(c.number) || 0), 0);
         // 直接批量落库 + 最后一次性校准统计，不逐章调 saveChapter：
         // saveChapter 每章都要读一次 novel 再写回（导入 500 章就是 500 次额外读写），
         // 而且它会调 addTodayWords——把几十万字的历史旧稿记成"今日新增"，
@@ -3296,7 +3379,7 @@ async function doImport(fallbackTitle) {
         await novelManager.recountNovelStats(novelId);
         window.__importChapters = null;
         closeModal();
-        ui.showToast(`已导入 ${chapters.length} 章，共 ${chapters.reduce((s,c)=>s+c.content.length,0).toLocaleString()} 字`, 4000);
+        ui.showToast(`已导入 ${chapters.length} 章，共 ${chapters.reduce((sum,c)=>sum+(c.content||'').length,0).toLocaleString()} 字`, 4000);
         navigateTo('novelDetail', { novelId });
     } catch (e) {
         ui.showToast('导入失败：' + e.message, 4500);
@@ -5127,14 +5210,12 @@ const EXTRACT_WB_LABEL = {
 };
 
 function parseExtraction(text) {
-    const raw = String(text || '').trim();
-    if (!raw) return null;
-    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const body = fenced ? fenced[1].trim() : raw;
-    const objText = body.match(/\{[\s\S]*\}/);
-    if (!objText) return null;
-    try {
-        const o = JSON.parse(objText[0]);
+    // 校验必须看到抽取结果的标志字段，否则可能咬到正文里的示例 JSON
+    const o = parseJsonLoose(text, '{', '}', (v) =>
+        v && typeof v === 'object' && !Array.isArray(v) &&
+        ('summary' in v || 'characters' in v || 'world' in v || 'foreshadow' in v || 'conflicts' in v));
+    if (!o) return null;
+    {
         const arr = (v) => Array.isArray(v) ? v : [];
         const conf = (v) => {
             const n = Number(v);
@@ -5166,8 +5247,6 @@ function parseExtraction(text) {
                 .filter(x => x && x.with)
                 .map(x => ({ with: String(x.with).trim(), evidence: String(x.evidence || '').trim(), confidence: conf(x.confidence) }))
         };
-    } catch (e) {
-        return null;
     }
 }
 
@@ -5206,7 +5285,9 @@ function renderExtractModal(data, novelId, chapterNum) {
     };
 
     const total = data.characters.length + data.world.length + data.foreshadow.length;
-    const html = `
+    // 外层包一个 id：createModal 允许叠加，closeModal 只关最上面那个，
+    // 直接 querySelectorAll('.ex-check') 会读到还没关掉的旧弹窗里的勾选。
+    const html = `<div id="ex-root">
         ${data.summary ? `<div class="ex-group">
             <div class="ex-group-title">本章摘要（写进章节，供后续章节当上下文）</div>
             <label class="ex-item"><input type="checkbox" class="ex-check" data-key="summary" checked>
@@ -5224,7 +5305,8 @@ function renderExtractModal(data, novelId, chapterNum) {
         <div class="modal-actions">
             <button class="btn btn-outline" onclick="closeModal()">取消</button>
             <button class="btn btn-primary" onclick="applyExtraction('${escapeJs(novelId)}', ${chapterNum})">采纳选中项</button>
-        </div>`;
+        </div>
+    </div>`;
     createModal(`提取设定 · 第${chapterNum}章`, html).show();
 }
 
@@ -5233,7 +5315,11 @@ async function applyExtraction(novelId, chapterNum) {
     if (!data) { ui.showToast('没有可写入的内容'); return; }
 
     const picked = { summary: false, characters: [], world: [], foreshadow: [], harvested: [] };
-    document.querySelectorAll('.ex-check').forEach(c => {
+    // 取最后一个：弹窗按顺序挂到 DOM 上，叠加时最后一个才是用户正在看的那层
+    const roots = document.querySelectorAll('#ex-root');
+    const root = roots.length ? roots[roots.length - 1] : null;
+    if (!root) { ui.showToast('弹窗已关闭'); return; }
+    root.querySelectorAll('.ex-check').forEach(c => {
         if (!c.checked) return;
         const k = c.dataset.key;
         if (k === 'summary') { picked.summary = true; return; }
@@ -5810,7 +5896,11 @@ window.addEventListener('popstate', () => {
     if (isNativeApp()) return;
     const prev = pageHistory.pop();
     if (!prev || !prev.page) {
-        // 已经退到应用的第一条历史，再退就该离开页面了——不拦，让浏览器自己处理
+        // 栈里没有对应页面，但浏览器已经退掉一条历史（切换底部 tab 时
+        // replaceState 会留下这种状态）。旧实现直接 return：界面不动、历史却退了，
+        // 用户再按一次就直接退出应用，感觉像"返回键坏了"。
+        // 这里把当前页重新压回历史，保证「按一次返回 = 退一格」的直觉。
+        try { history.pushState({ owNav: store.currentPage }, ''); } catch (_) {}
         __suppressHistoryPush = false;
         return;
     }
@@ -6405,6 +6495,7 @@ function startNewChatSession() {
 }
 
 async function switchChatSession(sessionId) {
+    __chatRestoreSeq++;   // 作废 renderChat 里还没回来的自动恢复
     rememberChatSession(sessionId);
     closeChatDrawer();
     navigateTo('chat');
@@ -7013,11 +7104,13 @@ async function applyConflictSync(novelId) {
         if (hasChange) {
             // 批量同步不逐章走 saveChapter：它每次都重算作品统计（O(n) 读 + 整条 novel 重写），
             // 而且会在覆盖前归档旧版本——一次同步几十章就等于塞几十份全文快照进 IndexedDB。
-            await db.put('chapters', Object.assign({}, ch, {
+            const updated = Object.assign({}, ch, {
                 content: newContent,
                 wordCount: newContent.length,
                 updated: Date.now()
-            }));
+            });
+            delete updated.paragraphs;   // 同上：段落缓存作废
+            await db.put('chapters', updated);
         }
     }
 
@@ -9038,11 +9131,15 @@ async function consistencyReplaceExecute(novelId, oldText, newText, affected) {
             // 1) saveChapter 每次都全量重算作品统计，替换 N 章就是 N 次 O(n) 读 —— 整体 O(n²)；
             // 2) 它还会在覆盖前归档旧版本，替换 100 章等于把 100 份全文快照塞进 versions 表，
             //    几十万字的老书一次替换就能吃掉大半配额。
-            await db.put('chapters', Object.assign({}, ch, {
+            const updated = Object.assign({}, ch, {
                 content: newContent,
                 wordCount: newContent.length,
                 updated: Date.now()
-            }));
+            });
+            // 段落缓存必须作废：不清的话进分段编辑器还是旧段落，
+            // 一点保存就把刚替换好的正文整体覆盖回去。
+            delete updated.paragraphs;
+            await db.put('chapters', updated);
             done++;
         }
         if (done) await novelManager.recountNovelStats(novelId);

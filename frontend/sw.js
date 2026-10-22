@@ -2,7 +2,7 @@
 // 缓存名必须跟着版本走：静态资源是 cache-first，缓存名不变的话，
 // 用户发版后仍在用旧 JS，而界面上显示的版本号已经是新的，排查时会一路被带偏。
 // CI（.github/workflows/build.yml）构建前会把这里改写成 package.json 的版本，不要手改。
-const CACHE_NAME = 'openwrite-mobile-v2.19.1';
+const CACHE_NAME = 'openwrite-mobile-v2.19.2';
 const STATIC_ASSETS = [
     '/',
     '/index.html',
