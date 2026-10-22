@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.21.1',   // 与 package.json 保持一致
+    VERSION: '2.22.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1954,7 +1954,7 @@ async function renderChat(container) {
     }
 
     container.innerHTML = `
-        <div style="padding: 0 16px; display: flex; flex-direction: column; height: calc(100vh - 120px); overflow-y: auto;">
+        <div class="chat-scroll">
             <!-- 状态行：模型 + 关联作品压成一行。
                  原来模型名单独一行、关联条又占一行，加上中间的 Logo 区，
                  进页面 250px 内一个能点的东西都没有。 -->
@@ -1999,6 +1999,9 @@ async function renderChat(container) {
 
         <!-- 整合式底部输入区 -->
         <div class="chat-composer">
+            <!-- 建书引导的表单卡片插在这一格；卡片出现时下面的输入框整体收起 -->
+            <div id="guide-card-slot"></div>
+            <div class="composer-main">
             <div class="composer-input-box">
                 <textarea class="composer-textarea" id="chat-input" rows="1"
                           oninput="autoGrowInput(this)"
@@ -2011,6 +2014,7 @@ async function renderChat(container) {
                 <button class="composer-btn" onclick="showModelIndicator()">${ICON_GEAR} 默认</button>
                 <button class="composer-btn" onclick="showMemory()">设定</button>
                 <button class="composer-send" id="chat-send-btn" onclick="sendMessage()">➤</button>
+            </div>
             </div>
         </div>
     `;
@@ -2089,7 +2093,17 @@ function syncComposerPadding() {
     if (!page) return;
     const composer = page.querySelector('.chat-composer');
     if (!composer) return;
-    page.style.paddingBottom = (composer.offsetHeight + 14) + 'px';
+    // 真正滚动的是 .chat-scroll，不是 #page-chat。
+    // composer 又是 fixed 停在导航栏之上，所以底部要留出「输入区高度」，
+    // 否则最后一条消息永远被压在输入框下面。
+    const scroller = page.querySelector('.chat-scroll');
+    if (!scroller) return;
+    // 光留 padding 不够：composer 是 fixed，会直接盖在滚动区上。
+    // 内容不满一屏时 padding 不生效，最后几条就压在输入框下面。
+    // 直接把滚动区高度减掉输入区，两者不再重叠。
+    scroller.style.paddingBottom = '16px';
+    scroller.style.height = 'calc(100dvh - var(--header-height) - var(--nav-height) - '
+        + composer.offsetHeight + 'px)';
 }
 
 // 渲染「当前关联作品」条：未关联 = 自由聊天；关联后 = 设定注入 + 可沉淀
@@ -3064,6 +3078,16 @@ async function renderNovelDetail(container, novelId) {
                     <div class="novel-header-desc">${escapeHtml(novel.description || '暂无简介')}</div>
                 </div>
             </div>
+
+            ${(novel.highlights || []).length ? `
+            <div class="nd-highlights">
+                <div class="nd-hl-head">设定总览</div>
+                ${novel.highlights.slice(0, 8).map(h => `<div class="gs-row">
+                    <span class="gs-k">${escapeHtml(h.label || '')}</span>
+                    <span class="gs-v">${escapeHtml(h.value || '')}</span>
+                </div>`).join('')}
+                <button class="guide-act" style="margin-top:10px;" onclick="exportSettingDoc('${escapeJs(novelId)}')">导出设定文档</button>
+            </div>` : ''}
 
             <div class="action-buttons-row" style="margin-bottom: 12px;">
                 <button class="btn btn-primary" onclick="aiWriteNextDirect('${novelId}')">⚡ AI写下一章</button>
@@ -4587,27 +4611,218 @@ async function createNovelWithAI() {
     setTimeout(() => startNovelCreationGuide(), 300);
 }
 
-// ===== 对话式小说创建引导 (v2.7.1) =====
+// ===== 对话式小说创建引导 =====
+
+// ===== 对话式建书引导 v2.22：表单卡片 =====
+// 旧版是五步聊天问答，每步都要手打。改成底部表单：chip 点选 + 可自定义，
+// 一屏一问带进度，能回退。顺序参考 Sudowrite 的 Braindump 优先：
+// 先让人把想法倒出来（可跳过），再用题材收敛——而不是上来就让人分类。
+
+const GUIDE_TOTAL = 4;
+const GUIDE_KEYS = ['idea', 'genre', 'style', 'title'];
+const GUIDE_SKIPPABLE = { idea: true };
+
+const GUIDE_GENRES = ['玄幻仙侠', '都市异能', '科幻末世', '悬疑灵异', '历史架空', '言情', '游戏竞技', '规则怪谈'];
+const GUIDE_STYLES = ['热血爽文', '轻松诙谐', '厚重正剧', '暗黑压抑'];
+
 let novelGuideState = null;
 
 function startNovelCreationGuide() {
     novelGuideState = {
         step: 0,
-        answers: {},
-        messagesBox: document.getElementById('chat-messages'),
-        inputBox: document.getElementById('chat-input')
+        answers: { idea: '', genre: '', style: '', title: '' },
+        titles: [],
+        busy: false
     };
-    
-    // 显示消息区域，隐藏 hero 和卡片
-    const hero = document.querySelector('.chat-hero');
     const actionList = document.querySelector('.chat-action-list');
-    if (hero) hero.style.display = 'none';
     if (actionList) actionList.style.display = 'none';
-    if (novelGuideState.messagesBox) novelGuideState.messagesBox.style.display = 'flex';
-    
-    // 第一步：类型。允许模糊描述——很多人这时候脑子里只有一句画面
-    addChatMessage('ai', '你好，我是你的写作搭档 ✨\n\n先说个大概：想写哪一类？（玄幻、都市、科幻、悬疑、历史…说不出具体的，描述一句画面也行）');
-    setupGuideInputHandler('genre');
+    const box = document.getElementById('chat-messages');
+    if (box) box.style.display = 'flex';
+    // 一句开场白：上面空着 500px 会让人以为没加载出来，顺便说清有几步
+    guidePushHtml('<div class="guide-intro">四个问题，大概半分钟。'
+        + '答完我直接给你一套能开写的骨架——<br>设定、大纲、第一章怎么起笔，一次到位。</div>');
+    guideRenderStep();
+}
+
+// 卡片显示时收起输入框；隐藏时还原
+function guideSetComposerVisible(visible) {
+    const main = document.querySelector('.composer-main');
+    if (main) main.style.display = visible ? '' : 'none';
+    syncComposerPadding();
+}
+
+function guideRenderStep() {
+    const st = novelGuideState;
+    const slot = document.getElementById('guide-card-slot');
+    if (!st || !slot) return;
+    guideSetComposerVisible(false);
+
+    const n = st.step + 1;
+    const key = GUIDE_KEYS[st.step];
+    const val = st.answers[key] || '';
+    let head = '', question = '', body = '';
+
+    if (key === 'idea') {
+        head = '想写个什么';
+        question = '一句话就行。想不出也没关系，直接跳过。';
+        body = `
+            <textarea class="guide-textarea" id="guide-idea" rows="3"
+                placeholder="比如：出租车司机在雨夜接到一单，客人是个没有影子的人"
+                oninput="guideIdeaInput(this)">${escapeHtml(val)}</textarea>`;
+    } else if (key === 'genre') {
+        head = '题材';
+        question = '打算写哪个方向？';
+        body = `<div class="guide-chips">
+            ${GUIDE_GENRES.map(g => `<button class="guide-chip${val === g ? ' on' : ''}"
+                data-guide-chip="genre" data-value="${escapeAttr(g)}"
+                onclick="guidePick('genre', '${escapeJs(g)}')">${escapeHtml(g)}</button>`).join('')}
+        </div>
+        <input class="guide-custom" id="guide-custom" placeholder="或者自己写一个…"
+            oninput="guideCustomInput('genre')">`;
+    } else if (key === 'style') {
+        head = '风格';
+        question = '同样是都市异能，写法可以完全不同。';
+        body = `<div class="guide-chips">
+            ${GUIDE_STYLES.map(g => `<button class="guide-chip${val === g ? ' on' : ''}"
+                data-guide-chip="style" data-value="${escapeAttr(g)}"
+                onclick="guidePick('style', '${escapeJs(g)}')">${escapeHtml(g)}</button>`).join('')}
+        </div>
+        <input class="guide-custom" id="guide-custom" placeholder="或者自己描述，比如「冷幽默、句子短」"
+            oninput="guideCustomInput('style')">`;
+    } else if (key === 'title') {
+        head = '书名';
+        question = '先挑一个，后面随时能改。';
+        body = `<div id="guide-title-area">${st.titles.length
+            ? st.titles.map(t => `<button class="guide-chip${val === t ? ' on' : ''}"
+                data-guide-chip="title" data-value="${escapeAttr(t)}"
+                onclick="guidePick('title', '${escapeJs(t)}')">${escapeHtml(t)}</button>`).join('')
+            : '<div class="guide-loading">正在按题材和风格想几个…</div>'}
+        </div>
+        <input class="guide-custom" id="guide-custom" placeholder="或者自己起一个"
+            value="${escapeAttr(val)}" oninput="guideCustomInput('title')">`;
+    }
+
+    slot.innerHTML = `
+        <div class="guide-card">
+            <div class="guide-card-head">
+                <span class="guide-step">${n}/${GUIDE_TOTAL}</span>
+                <span class="guide-head">${head}</span>
+            </div>
+            <div class="guide-q">${question}</div>
+            ${body}
+            <div class="guide-foot">
+                <button class="guide-back" ${n === 1 ? 'disabled' : ''} onclick="guideBack()">上一题</button>
+                <button class="guide-next" onclick="guideNext()">${n === GUIDE_TOTAL ? '开始写' : '下一题'}</button>
+            </div>
+        </div>`;
+    syncComposerPadding();
+
+    // 第四步进来自动去要书名候选
+    if (key === 'title' && !st.titles.length && !st.busy) guideLoadTitles();
+}
+
+function guideIdeaInput(el) {
+    if (novelGuideState) novelGuideState.answers.idea = el.value;
+}
+
+// 选 chip：清空自定义框，避免两个值打架
+function guidePick(key, value) {
+    const st = novelGuideState;
+    if (!st) return;
+    st.answers[key] = value;
+    document.querySelectorAll('[data-guide-chip="' + key + '"]').forEach(el => {
+        el.classList.toggle('on', el.dataset.value === value);
+    });
+    const ci = document.getElementById('guide-custom');
+    if (ci) ci.value = '';
+}
+
+// 手写：取消所有 chip 高亮
+function guideCustomInput(key) {
+    const st = novelGuideState;
+    const ci = document.getElementById('guide-custom');
+    if (!st || !ci) return;
+    const v = ci.value.trim();
+    st.answers[key] = v;
+    document.querySelectorAll('[data-guide-chip="' + key + '"]').forEach(el => el.classList.remove('on'));
+}
+
+async function guideNext() {
+    const st = novelGuideState;
+    if (!st || st.busy) return;
+    const key = GUIDE_KEYS[st.step];
+    const v = (st.answers[key] || '').trim();
+
+    if (!v && !GUIDE_SKIPPABLE[key]) {
+        // 手写框里可能刚输入还没触发 oninput（部分输入法）
+        ui.showToast(key === 'title' ? '选一个书名，或者自己起一个' : '选一个，或者在下面自己写');
+        return;
+    }
+    if (v) addChatMessage('user', v);
+
+    st.step++;
+    if (st.step >= GUIDE_TOTAL) { await guideGenerate(); return; }
+    guideRenderStep();
+}
+
+function guideBack() {
+    const st = novelGuideState;
+    if (!st || st.step === 0 || st.busy) return;
+    st.step--;
+    // 往回改时，下游的自动候选全部作废
+    if (st.step < 3) st.titles = [];
+    guideRenderStep();
+}
+
+// 按题材 + 风格 + 想法拟 3 个书名
+async function guideLoadTitles() {
+    const st = novelGuideState;
+    if (!st) return;
+    st.busy = true;
+    const area = document.getElementById('guide-title-area');
+    try {
+        const ctx = [
+            st.answers.genre ? '题材：' + st.answers.genre : '',
+            st.answers.style ? '风格：' + st.answers.style : '',
+            st.answers.idea ? '想法：' + st.answers.idea : ''
+        ].filter(Boolean).join('；');
+        const r = await ai.chat([
+            { role: 'system', content: '你是网文编辑，只输出书名，不要解释。' },
+            { role: 'user', content: ctx + '\n\n按这个方向起 3 个中文书名，要求：符合平台调性、2-8 字、不要书名号、不要编号。每行一个，只输出三行。' }
+        ], null, 200);
+        const list = String(r || '').split('\n')
+            .map(x => x.replace(/^[\s\d.、．)）-]+/, '').replace(/[《》「」"']/g, '').trim())
+            .filter(x => x && x.length <= 14)
+            .slice(0, 3);
+        st.titles = list;
+        if (area) {
+            area.innerHTML = list.length
+                ? list.map(t => '<button class="guide-chip" data-guide-chip="title" data-value="'
+                    + escapeAttr(t) + '" onclick="guidePick(\'title\', \'' + escapeJs(t) + '\')">'
+                    + escapeHtml(t) + '</button>').join('')
+                : '<div class="guide-loading">没想出来，直接自己起一个吧</div>';
+        }
+    } catch (e) {
+        if (area) area.innerHTML = '<div class="guide-loading">书名没生成出来，自己起一个也行</div>';
+    } finally {
+        if (novelGuideState) novelGuideState.busy = false;
+    }
+}
+
+// 一行状态：等待时只显示这一句，不刷工具链
+function guideSetBusy(text) {
+    const box = document.getElementById('chat-messages');
+    if (!box) return;
+    let el = document.getElementById('guide-busy');
+    if (!text) { if (el) el.remove(); return; }
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'guide-busy';
+        el.className = 'msg-row ai';
+        box.appendChild(el);
+    }
+    el.innerHTML = '<div class="guide-busy-line"><i></i>' + escapeHtml(text) + '</div>';
+    box.scrollTop = box.scrollHeight;
 }
 
 function addChatMessage(role, text, options = []) {
@@ -4639,226 +4854,281 @@ function addChatMessage(role, text, options = []) {
     box.scrollTop = box.scrollHeight;
 }
 
-async function guideAnswer(key, value) {
-    if (!novelGuideState) return;
-    novelGuideState.answers[key] = value;
-    
-    // 显示用户回答
-    addChatMessage('user', value);
-    
-    // 清除选项按钮（通过重新渲染消息）
-    // 进入下一步
-    novelGuideState.step++;
-    await runGuideStep();
-}
+// 生成骨架 → 落库 → 总览 + 开篇建议。
+// 不再让用户"确认一次再建"——四个问题都答完了，再确认一次只是多一次点击。
+async function guideGenerate() {
+    const st = novelGuideState;
+    if (!st) return;
+    const a = st.answers;
 
-async function runGuideStep() {
-    const { step, answers } = novelGuideState;
+    const slot = document.getElementById('guide-card-slot');
+    if (slot) slot.innerHTML = '';
+    guideSetComposerVisible(true);
+    guideSetBusy('正在搭大纲…');
 
-    if (step === 1) {
-        addChatMessage('ai', `${answers.genre}，行。\n\n书名叫什么？没定就先随便取一个，后面能改。`);
-        setupGuideInputHandler('title');
-    } else if (step === 2) {
-        // 关键一步：旧版在这里直接生成大纲，角色全是 AI 编的，作者没有代入感
-        addChatMessage('ai', `《${answers.title}》，记下了。\n\n现在说主角——叫什么名字，是干什么的？一句话就够。`);
-        setupGuideInputHandler('protagonist');
-    } else if (step === 3) {
-        addChatMessage('ai', `主角有了。\n\n他最想要什么，或者被什么事困住？这一条决定整本书往哪走。`, [
-            { label: '想不出，你先拟一个', action: () => guideDraftAnswer('desire') },
-            { label: '跳过', action: () => guideAnswer('desire', '（未定，由你按类型补）') }
-        ]);
-        setupGuideInputHandler('desire');
-    } else if (step === 4) {
-        addChatMessage('ai', `最后一件：这个世界有什么特别的规矩？\n\n比如「修行要先交命」「下雨天不能出门」。想不出就跳过，我按类型常规来。`, [
-            { label: '跳过', action: () => guideAnswer('world', '（按类型常规设定）') }
-        ]);
-        setupGuideInputHandler('world');
-    } else if (step === 5) {
-        addChatMessage('ai', '够了，我按这些搭故事…');
-        await generateNovelFromGuide();
-    }
-}
+    const given = [
+        a.idea ? '作者的想法：' + a.idea : '',
+        '题材：' + a.genre,
+        '风格：' + a.style,
+        '书名：《' + a.title + '》'
+    ].filter(Boolean).join('\n');
 
-// 「你先拟一个」：把建议填进输入框，用户按发送才生效——保留最后决定权
-async function guideDraftAnswer(key) {
-    if (!novelGuideState) return;
-    const a = novelGuideState.answers;
-    const ctx = `类型：${a.genre}｜书名：${a.title}｜主角：${a.protagonist}`;
-    const ask = key === 'desire'
-        ? '给这个主角一个具体、有张力的核心欲望或困境。只输出一句话，不超过 20 字，不要解释、不要引号。'
-        : '给这个世界一条具体、有记忆点的规矩。只输出一句话，不超过 25 字，不要解释、不要引号。';
+    const prompt = '请为一部' + a.genre + '小说搭一套可以直接开写的骨架。\n\n' + given + '\n\n' +
+`要求：
+1. 大纲 12-15 章。每章写清「这一章发生了什么变化」，不要写"冲突升级""局势紧张"这种写不出来的话。
+2. 角色 3-5 个。主角必须有具体身份、想要什么、被什么困住；配角写清与主角的关系。
+3. 世界观只写会影响剧情的规则，2-3 条，不要堆设定。
+4. highlights 6 条左右，行名按题材决定（都市写「金手指」「主角」，悬疑写「谜面」「关键线索」，玄幻写「力量体系」「主角」），value 一句话。
+5. opening：第一章的开篇建议，120 字以内。写清从哪个场景起笔、发生什么、结尾留什么钩子。**只给建议，不要写正文**。
 
-    addChatMessage('ai', '我想想…');
-    try {
-        const r = await ai.chat([
-            { role: 'system', content: '你是小说策划，回答必须极简，只给结论。' },
-            { role: 'user', content: `${ctx}\n\n${ask}` }
-        ], null, 200);
-        const v = (r || '').trim().split('\n')[0].replace(/^["「『]|["」』]$/g, '').trim();
-        if (v) {
-            const input = document.getElementById('chat-input');
-            if (input) { input.value = v; input.focus(); }
-            addChatMessage('ai', `先拟这个：${v}\n\n按发送就用它，或者直接改成你的。`);
-            return;
-        }
-    } catch (e) { /* 失败就退回自由输入 */ }
-    addChatMessage('ai', '这个我一时没想好，你说个大概方向也行。');
-}
-
-function setupGuideInputHandler(expectedKey) {
-    const input = document.getElementById('chat-input');
-    const sendBtn = document.getElementById('chat-send-btn');
-    if (!input || !sendBtn) return;
-    
-    // 临时替换发送按钮行为
-    const originalOnclick = sendBtn.onclick;
-    sendBtn.onclick = async () => {
-        const text = input.value.trim();
-        if (!text) return;
-        input.value = '';
-        
-        novelGuideState.answers[expectedKey] = text;
-        addChatMessage('user', text);
-        novelGuideState.step++;
-        
-        // 恢复原始发送按钮
-        sendBtn.onclick = originalOnclick;
-        await runGuideStep();
-    };
-    
-    // 也支持回车发送
-    input.onkeydown = (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendBtn.click();
-        }
-    };
-}
-
-async function generateNovelFromGuide() {
-    const { answers } = novelGuideState;
-    const genre = answers.genre || '小说';
-    const title = answers.title || '未命名';
-    
-    try {
-        // 旧版只把类型和书名给模型，角色和世界观全由它编——用户拿到的是别人的故事。
-        // 现在把用户亲口说过的三件事当作硬约束传进去，模型只补缺口。
-        const given = [];
-        if (answers.protagonist) given.push(`主角：${answers.protagonist}`);
-        if (answers.desire) given.push(`主角的核心欲望或困境：${answers.desire}`);
-        if (answers.world) given.push(`世界设定：${answers.world}`);
-
-        const prompt = `请为一部${genre}小说生成完整大纲，书名是《${title}》。
-
-${given.length ? `以下是作者已经定下的设定，必须严格执行，不得改名、不得改成别的身份：
-${given.join('\n')}
-` : ''}
-要求：
-1. 10-15 章的章节大纲
-2. 角色表：主角必须沿用上面的设定（名字一字不改）；另补 2-4 个配角，写清身份、性格、与主角的关系
-3. 世界观简述：已有设定要接着写，不要另起一套；没给的才由你补
-4. 故事梗概（100 字左右），要围绕主角的那个欲望或困境展开
-
-请严格输出JSON格式（不要markdown代码块）：
+只输出 JSON，不要 markdown 代码块：
 {
-  "outline": [
-    {"chapter": 1, "title": "第一章标题", "summary": "本章概要"}
-  ],
-  "characters": [
-    {"name": "角色名", "role": "主角", "description": "描述"}
-  ],
+  "outline": [{"chapter": 1, "title": "章名", "summary": "本章的变化"}],
+  "characters": [{"name": "名字", "role": "主角", "description": "身份+想要什么+困境"}],
   "worldbuilding": "世界观简述",
-  "synopsis": "故事梗概"
+  "synopsis": "100 字梗概",
+  "highlights": [{"label": "世界", "value": "一句话"}],
+  "opening": "开篇建议"
 }`;
-        
-        const result = await ai.chat([
-            { role: 'system', content: '你是专业小说编辑，擅长根据简单想法扩展为完整大纲。' },
+
+    let plan = null;
+    try {
+        const raw = await ai.chat([
+            { role: 'system', content: '你是网文策划编辑。产出会直接变成写作骨架，每一条都要具体到能写。' },
             { role: 'user', content: prompt }
         ], null, 4000);
-        
-        // 解析 JSON
-        let plan = null;
-        try {
-            const cleaned = result.replace(/\`\`\`json?\s*/g, '').replace(/\`\`\`\s*/g, '').trim();
-            plan = JSON.parse(cleaned);
-        } catch (_) {
-            const m = result.match(/\{[\s\S]*\}/);
-            if (m) { try { plan = JSON.parse(m[0]); } catch (_) {} }
-        }
-        
-        if (!plan || !plan.outline) {
-            addChatMessage('ai', '抱歉，大纲生成遇到了问题。请手动创建小说吧。', [
-                { label: '手动创建', action: () => { showCreateNovelModal(); novelGuideState = null; } }
-            ]);
-            return;
-        }
-        
-        // 展示大纲给用户确认（书名使用用户输入的）
-        const outlineText = (plan.outline || []).map(o => `第${o.chapter}章 ${o.title}`).join('\n');
-        const charsText = (plan.characters || []).map(c => `• ${c.name}（${c.role}）：${c.description}`).join('\n');
-        
-        const givenLine = answers.protagonist
-            ? `\n\n✍️ 主角按你说的：${answers.protagonist}${answers.desire ? `\n　 动机：${answers.desire}` : ''}`
-            : '';
-        addChatMessage('ai', `📖 大纲已生成！\n\n书名：《${title}》\n\n📋 章节规划：\n${outlineText}\n\n👥 主要角色：\n${charsText}${givenLine}\n\n确认创建这本小说吗？（角色名不对可以点重新生成，或创建后手动改）`, [
-            { label: '✅ 确认创建', action: () => guideConfirmCreate(plan, title) },
-            { label: '🔄 重新生成', action: () => { novelGuideState.step = 1; runGuideStep(); } },
-            { label: '❌ 取消', action: () => { novelGuideState = null; addChatMessage('ai', '已取消。你可以随时重新点击「新书启航」开始。'); } }
-        ]);
-        
+        plan = parseJsonLoose(raw, '{', '}', (v) =>
+            v && typeof v === 'object' && !Array.isArray(v) && 'outline' in v);
     } catch (e) {
-        addChatMessage('ai', '生成失败：' + e.message, [
-            { label: '手动创建', action: () => showCreateNovelModal() }
-        ]);
+        plan = null;
     }
+
+    if (!plan || !Array.isArray(plan.outline) || !plan.outline.length) {
+        guideSetBusy('');
+        addChatMessage('ai', '大纲没生成出来（可能是网络问题，或模型返回的格式不对）。', []);
+        const box = document.getElementById('chat-messages');
+        if (box) {
+            const d = document.createElement('div');
+            d.className = 'msg-row ai';
+            d.innerHTML = '<div class="guide-actions">'
+                + '<button class="guide-act primary" onclick="guideRetry()">再来一次</button>'
+                + '<button class="guide-act" onclick="guideManual()">手动建书</button>'
+                + '</div>';
+            box.appendChild(d);
+            box.scrollTop = box.scrollHeight;
+        }
+        return;
+    }
+
+    guideSetBusy('正在建书…');
+    let novel;
+    try {
+        novel = await guideSaveNovel(plan, a);
+    } catch (e) {
+        guideSetBusy('');
+        addChatMessage('ai', '建书失败：' + e.message, []);
+        return;
+    }
+    guideSetBusy('');
+
+    // ① 设定总览
+    guidePushHtml(renderSettingSummary(plan, a, novel.id));
+
+    // ② 开篇建议 + 下一步
+    const opening = String(plan.opening || '').trim();
+    const box = document.getElementById('chat-messages');
+    if (box) {
+        const d = document.createElement('div');
+        d.className = 'msg-row ai guide-stack';
+        d.innerHTML = (opening
+            ? '<div class="guide-result"><div class="gs-open-k">第一章可以这么起笔</div>'
+              + '<div class="gs-open-v">' + escapeHtml(opening) + '</div></div>'
+            : '')
+            + '<div class="guide-actions">'
+            + '<button class="guide-act primary" onclick="guideStartWriting(\'' + escapeJs(novel.id) + '\')">'
+            + (opening ? '按这个写第一章' : '直接写第一章') + '</button>'
+            + '<button class="guide-act" onclick="guideRedo()">换个方向</button>'
+            + '<button class="guide-act" onclick="guideOpenDetail(\'' + escapeJs(novel.id) + '\')">我自己来</button>'
+            + '</div>';
+        box.appendChild(d);
+        box.scrollTop = box.scrollHeight;
+    }
+    // 结果卡片比较高，重算滚动区高度后要滚到底，否则「按这个写第一章」被挡在下面
+    syncComposerPadding();
+    const sc = document.querySelector('.chat-scroll');
+    if (sc) sc.scrollTop = sc.scrollHeight;
 }
 
-async function guideConfirmCreate(plan, title) {
-    const answers = (novelGuideState && novelGuideState.answers) || {};
+// 落库：作品 + 大纲 + 角色表 + 世界观表 + 高亮项 + 开篇建议
+async function guideSaveNovel(plan, a) {
+    const novel = await novelManager.create(
+        a.title || plan.title || '未命名',
+        plan.synopsis || '',
+        a.genre || ''
+    );
+    novel.style = a.style || '';
+    novel.idea = a.idea || '';
+    novel.highlights = Array.isArray(plan.highlights) ? plan.highlights.slice(0, 10) : [];
+    novel.opening = String(plan.opening || '');
+    if (Array.isArray(plan.outline)) novel.outline = plan.outline;
+    await novelManager.update(novel);
+
+    for (const c of (plan.characters || [])) {
+        if (!c || !c.name) continue;
+        try {
+            await novelManager.createCharacter(novel.id, {
+                name: c.name,
+                role: c.role || '',
+                description: c.description || '',
+                personality: c.description || ''
+            });
+        } catch (_) { /* 单个角色失败不影响建书 */ }
+    }
+
+    if (plan.worldbuilding) {
+        try {
+            await novelManager.createWorldbuilding(novel.id, {
+                title: '世界观',
+                category: 'other',
+                content: String(plan.worldbuilding)
+            });
+        } catch (_) { /* 同上 */ }
+    }
+    return novel;
+}
+
+// 设定总览：一屏看完 AI 编了个什么故事
+function renderSettingSummary(plan, a, novelId) {
+    const rows = (plan.highlights || []).filter(h => h && h.label).slice(0, 8);
+    const fallback = [
+        { label: '题材', value: a.genre || '' },
+        { label: '风格', value: a.style || '' }
+    ].filter(r => r.value);
+    const list = rows.length ? rows : fallback;
+
+    return '<div class="guide-result">'
+        + '<div class="gs-head">《' + escapeHtml(a.title || '未命名') + '》已建好</div>'
+        + (list.length ? '<div class="gs-rows">' + list.map(h =>
+            '<div class="gs-row"><span class="gs-k">' + escapeHtml(h.label)
+            + '</span><span class="gs-v">' + escapeHtml(h.value || '') + '</span></div>').join('') + '</div>'
+            : '')
+        + '<div class="gs-foot">'
+        + '<button class="guide-act" onclick="exportSettingDoc(\'' + escapeJs(novelId) + '\')">导出设定文档</button>'
+        + '<button class="guide-act" onclick="guideOpenDetail(\'' + escapeJs(novelId) + '\')">查看作品</button>'
+        + '</div></div>';
+}
+
+function guidePushHtml(html) {
+    const box = document.getElementById('chat-messages');
+    if (!box) return;
+    const d = document.createElement('div');
+    d.className = 'msg-row ai';
+    d.innerHTML = html;
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+}
+
+// 按开篇建议写第一章：把建议写进本章场景卡，再进编辑器
+async function guideStartWriting(novelId) {
     try {
-        // 类型是用户在第一步亲口说的，之前建书时传的是空串 —— 书架分类标签一直是空的
-        const novel = await novelManager.create(
-            title || plan.title,
-            plan.synopsis || '',        // 简介放梗概，不是世界观（原来整段世界观被塞进简介）
-            answers.genre || ''
-        );
-
-        if (plan.outline) novel.outline = plan.outline;
-        await novelManager.update(novel);
-
-        // 角色要写进 characters 表：角色卡页、详情页的资料区读的都是这张表。
-        // 以前只塞进 novel.characters 内嵌数组，引导建完书去「角色」页是「暂无角色」。
-        for (const c of (plan.characters || [])) {
-            if (!c || !c.name) continue;
-            try {
-                await novelManager.createCharacter(novel.id, {
-                    name: c.name,
-                    role: c.role || '',
-                    description: c.description || '',
-                    personality: c.description || ''
-                });
-            } catch (_) { /* 单个角色失败不影响建书 */ }
+        const novel = await novelManager.get(novelId);
+        if (novel && novel.opening) {
+            // 第 1 章这时还不存在（saveChapterScene 会抛「章节不存在」），先建出来
+            let chapter = await novelManager.getChapter(novelId, 1);
+            if (!chapter) {
+                const outline = novel.outline || [];
+                const first = outline.find(o => Number(o.chapter) === 1) || outline[0] || {};
+                const title = first.title ? '第1章 ' + first.title : '第一章';
+                await novelManager.saveChapter(novelId, 1, title, '', null, { archive: false });
+                chapter = await novelManager.getChapter(novelId, 1);
+            }
+            if (chapter) {
+                const scene = chapter.scene || {};
+                if (!scene.goal) {
+                    scene.goal = String(novel.opening).slice(0, 300);
+                    await novelManager.saveChapterScene(novelId, 1, scene);
+                    ui.showToast('开篇建议已放进第 1 章的场景卡', 3000);
+                }
+            }
         }
+    } catch (_) { /* 写不进场景卡也不挡着进编辑器 */ }
+    novelGuideState = null;
+    navigateTo('chapterEdit', { novelId, chapterNum: 1 });
+}
 
-        // 世界观同理，之前整段文字塞在简介里，世界观库是空的
-        if (plan.worldbuilding) {
-            try {
-                await novelManager.createWorldbuilding(novel.id, {
-                    title: '世界观',
-                    category: 'other',
-                    content: String(plan.worldbuilding)
-                });
-            } catch (_) { /* 同上 */ }
+function guideOpenDetail(novelId) {
+    novelGuideState = null;
+    navigateTo('novelDetail', { novelId });
+}
+
+function guideRedo() {
+    if (!novelGuideState) novelGuideState = { step: 1, answers: {}, titles: [], busy: false };
+    novelGuideState.step = 1;          // 回到「题材」
+    novelGuideState.titles = [];
+    guideRenderStep();
+}
+
+function guideRetry() {
+    if (novelGuideState) novelGuideState.step = GUIDE_TOTAL - 1;
+    guideRenderStep();
+}
+
+function guideManual() {
+    novelGuideState = null;
+    guideSetComposerVisible(true);
+    const slot = document.getElementById('guide-card-slot');
+    if (slot) slot.innerHTML = '';
+    showCreateNovelModal();
+}
+
+// 导出 Markdown：把总览、角色、世界观、大纲合成一份，等价于别人的「小说资料/」文件夹
+async function exportSettingDoc(novelId) {
+    try {
+        const novel = await novelManager.get(novelId);
+        if (!novel) return;
+        const chars = await novelManager.listCharacters(novelId).catch(() => []);
+        const wbs = await novelManager.listWorldbuilding(novelId).catch(() => []);
+        const outline = (novel.outline || []);
+
+        const L = [];
+        L.push('# ' + (novel.title || '未命名'), '');
+        if (novel.genre || novel.style) L.push('> ' + [novel.genre, novel.style].filter(Boolean).join(' · '), '');
+        if (novel.description) L.push('## 一句话', '', novel.description, '');
+
+        if ((novel.highlights || []).length) {
+            L.push('## 设定总览', '');
+            novel.highlights.forEach(h => L.push('- **' + (h.label || '') + '**：' + (h.value || '')));
+            L.push('');
         }
-        
-        addChatMessage('ai', `✅ 小说《${title || plan.title}》已创建！\n\n接下来想做什么？`, [
-            { label: '✍️ 直接写第1章', action: () => { novelGuideState = null; navigateTo('chapterEdit', { novelId: novel.id, chapterNum: 1 }); } },
-            { label: '📋 查看作品详情', action: () => { novelGuideState = null; navigateTo('novelDetail', { novelId: novel.id }); } },
-            { label: '🗺️ 去多Agent协作', action: () => { novelGuideState = null; navigateTo('agentStudio', { novelId: novel.id }); } }
-        ]);
-        
+        if (chars.length) {
+            L.push('## 角色', '');
+            chars.forEach(c => L.push('- **' + (c.name || '') + '**（' + (c.role || '角色') + '）：' + (c.description || c.personality || '')));
+            L.push('');
+        }
+        if (wbs.length) {
+            L.push('## 世界观', '');
+            wbs.forEach(w => L.push('- **' + (w.title || '') + '**：' + (w.content || '')));
+            L.push('');
+        }
+        if (outline.length) {
+            L.push('## 大纲', '');
+            outline.forEach(o => L.push((o.chapter || '') + '. **' + (o.title || '') + '**：' + (o.summary || '')));
+            L.push('');
+        }
+        if (novel.opening) L.push('## 第一章开篇建议', '', novel.opening, '');
+
+        const blob = new Blob([L.join('\n')], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = (novel.title || '设定') + '-设定.md';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+        ui.showToast('已导出设定文档');
     } catch (e) {
-        addChatMessage('ai', '创建失败：' + e.message);
+        ui.showToast('导出失败：' + e.message);
     }
 }
 

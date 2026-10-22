@@ -5465,3 +5465,252 @@ body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+/* ============================================================
+   建书引导：底部表单卡片（v2.22）
+   替代原来的聊天一问一答：chip 点选、带进度、可回退。
+   ============================================================ */
+
+.guide-card {
+    border: 1px solid var(--border-strong, var(--border));
+    border-radius: 16px;
+    background: var(--surface);
+    padding: 14px 14px 12px;
+}
+.guide-card-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+.guide-step {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    letter-spacing: .04em;
+    font-variant-numeric: tabular-nums;
+}
+.guide-head {
+    font-family: var(--serif);
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+}
+.guide-q {
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+
+.guide-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.guide-chip {
+    padding: 8px 13px;
+    font-size: 13px;
+    font-family: inherit;
+    border: 1px solid var(--border);
+    background: var(--surface-2, var(--bg));
+    color: var(--text);
+    border-radius: 999px;
+    cursor: pointer;
+}
+.guide-chip:active { background: var(--border); }
+.guide-chip.on {
+    background: var(--ink);
+    color: var(--paper);
+    border-color: var(--ink);
+}
+
+.guide-custom,
+.guide-textarea {
+    width: 100%;
+    margin-top: 10px;
+    padding: 9px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    color: var(--text);
+    background: var(--surface-2, var(--bg));
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    outline: none;
+}
+.guide-textarea { resize: none; line-height: 1.6; }
+.guide-custom:focus,
+.guide-textarea:focus { border-color: var(--text-tertiary); }
+
+.guide-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 14px;
+}
+.guide-back {
+    padding: 8px 0;
+    font-size: 12.5px;
+    font-family: inherit;
+    color: var(--text-tertiary);
+    background: none;
+    border: 0;
+}
+.guide-back[disabled] { opacity: .35; }
+.guide-next {
+    padding: 9px 22px;
+    font-size: 13.5px;
+    font-weight: 600;
+    font-family: inherit;
+    color: var(--paper);
+    background: var(--ink);
+    border: 0;
+    border-radius: 999px;
+}
+.guide-next:active { background: #000; }
+
+.guide-loading {
+    padding: 6px 0;
+    font-size: 12.5px;
+    color: var(--text-tertiary);
+}
+
+/* 等待时的一行状态 */
+.guide-busy-line {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 2px 4px;
+    font-size: 12px;
+    color: var(--text-tertiary);
+}
+.guide-busy-line i {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-tertiary);
+    animation: guidePulse 1s ease-in-out infinite;
+}
+@keyframes guidePulse {
+    0%, 100% { opacity: .25; }
+    50% { opacity: 1; }
+}
+
+/* 建书结果：设定总览 + 开篇建议 */
+.msg-row.ai > .guide-result { width: 100%; }
+.guide-result {
+    padding: 14px;
+    margin-bottom: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+}
+.gs-head {
+    font-family: var(--serif);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    margin-bottom: 10px;
+}
+.gs-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+.gs-row {
+    display: flex;
+    gap: 10px;
+    font-size: 12.5px;
+    line-height: 1.6;
+}
+.gs-k {
+    flex: 0 0 60px;
+    color: var(--text-tertiary);
+}
+.gs-v {
+    flex: 1;
+    min-width: 0;
+    color: var(--text);
+}
+.gs-foot {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+.gs-open-k {
+    font-size: 11px;
+    letter-spacing: .04em;
+    color: var(--text-tertiary);
+    margin-bottom: 6px;
+}
+.gs-open-v {
+    font-size: 13px;
+    line-height: 1.75;
+}
+
+.msg-row.ai > .guide-actions { width: 100%; }
+.guide-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+.guide-act {
+    padding: 8px 14px;
+    font-size: 12.5px;
+    font-family: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+}
+.guide-act.primary {
+    color: var(--paper);
+    background: var(--ink);
+    border-color: var(--ink);
+}
+
+/* 引导开场白：不然上半屏空着一大片，像没加载出来 */
+.guide-intro {
+    font-size: 13px;
+    line-height: 1.75;
+    color: var(--text-secondary);
+    padding: 2px 4px 6px;
+}
+
+/* 聊天滚动区：高度算准，底部留白由 syncComposerPadding 动态给 */
+.chat-scroll {
+    padding: 0 16px;
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - var(--header-height) - var(--nav-height));
+    overflow-y: auto;
+}
+
+/* 结果块竖排：建议在上、按钮在下。
+   原来两者是 msg-row 的直接子元素，被 flex 横排挤成两列，文字窄得读不了。 */
+.msg-row.ai.guide-stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+.msg-row.ai.guide-stack .guide-actions { margin-top: 0; }
+
+/* 详情页的设定总览：建书时生成的那几张表，离开聊天后还能看 */
+.nd-highlights {
+    padding: 13px 14px;
+    margin-bottom: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+.nd-hl-head {
+    font-family: var(--serif);
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 2px;
+}
