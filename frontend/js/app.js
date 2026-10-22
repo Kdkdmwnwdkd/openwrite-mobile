@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.23.0',   // 与 package.json 保持一致
+    VERSION: '2.24.0',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -3886,7 +3886,8 @@ function showEditorTools(novelId, chapterNum) {
         { icon: '🕘', name: '历史版本', desc: '回滚到旧稿', act: `showChapterHistory('${novelId}', ${chapterNum})` },
         { icon: '🔎', name: '查资料', desc: '联网检索并沉淀', act: `showResearchSheet('${novelId}')` },
         { icon: '🎧', name: '听稿校对', desc: 'TTS 逐句朗读', act: `navigateTo('listen', { novelId: '${novelId}', chapterNum: ${chapterNum} })` },
-        { icon: '🪝', name: '章末钩子', desc: '检查结尾留人能力', act: `checkChapterHook('${novelId}', ${chapterNum})` }
+        { icon: '🪝', name: '章末钩子', desc: '检查结尾留人能力', act: `checkChapterHook('${novelId}', ${chapterNum})` },
+        { icon: '👤', name: '人名检查', desc: '找出还没进角色库的名字', act: `checkChapterNames('${novelId}', ${chapterNum})` }
     ];
     const body = `<div class="tool-grid">
         ${tools.map(t => `
@@ -5749,6 +5750,139 @@ function renderReviewFindings(findings, content) {
             ${f.fix ? `<div class="review-fix">改法：${escapeHtml(f.fix)}</div>` : ''}
         </div>`;
     }).join('') + `</div>`;
+}
+
+// ===== 人名检查（纯本地，不调用模型）=====
+// 正文里写到新角色，但角色库没有他 —— 后面 AI 续写会把他当陌生人写，
+// 前后设定也就对不上了。这里用规则找出来，零成本。
+// 没有 NLP 库，靠两条信号：姓氏开头 + 后面跟动作词（"X说""X道""X看着他"）。
+// 宁可漏，不可误报：环境描写里那些"高兴""石头""林子"必须一个都不出来。
+
+const NAME_SURNAMES = '王李张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛段雷侯龙史陶黎贺顾毛郝龚邵万钱严武戴莫孔向汤';
+const NAME_DOUBLE = ['欧阳', '司马', '上官', '慕容', '令狐', '独孤', '南宫', '东方', '西门', '百里', '轩辕', '皇甫', '尉迟', '长孙', '宇文', '夏侯', '公孙'];
+const NAME_ACTION = ['说', '道', '问', '答', '笑', '哭', '喊', '叫', '看着', '看见', '看了眼', '回头',
+    '点头', '摇头', '转身', '抬手', '皱眉', '沉默', '开口', '回答', '低声', '忽然', '抬头', '低头',
+    '叹了口气', '愣了', '站起', '坐下', '走过', '进来', '出去', '想了想', '沉声', '轻笑', '冷哼', '脸色'];
+const NAME_STOP = new Set(('高兴 高手 高级 高度 高大 高音 高峰 白色 白天 白发 白菜 石头 石阶 石门 ' +
+    '时辰 时候 方向 方式 方案 方法 江山 江湖 江水 江南 马上 马车 马路 叶子 程度 程序 ' +
+    '黄金 黄色 木头 木门 林木 林中 林子 白云 白日 朱红 朱砂 胡同 胡说 何时 何必 何处 ' +
+    '余光 余地 余下 汪洋 范围 于今 林中 于是'
+).split(/\s+/).filter(Boolean));
+
+function detectUnknownNames(text, knownNames) {
+    const known = new Set(knownNames || []);
+    const chars = Array.from(String(text || ''));
+    const hits = new Map();
+
+    const add = (name, pos) => {
+        if (NAME_STOP.has(name)) return;
+        const arr = hits.get(name) || [];
+        arr.push(pos);
+        hits.set(name, arr);
+    };
+
+    for (let i = 0; i < chars.length; i++) {
+        let pre = '';
+        for (const d of NAME_DOUBLE) {
+            if (chars.slice(i, i + d.length).join('') === d) { pre = d; break; }
+        }
+        if (!pre && NAME_SURNAMES.includes(chars[i])) pre = chars[i];
+
+        if (pre) {
+            for (const extra of [1, 2]) {
+                const len = pre.length + extra;
+                if (i + len > chars.length) continue;
+                add(chars.slice(i, i + len).join(''), i);
+            }
+        } else if ('老小阿'.includes(chars[i]) && i + 2 <= chars.length) {
+            add(chars.slice(i, i + 2).join(''), i);   // 老周、小满、阿七
+        }
+    }
+
+    const scored = [];
+    for (const [name, positions] of hits) {
+        if (known.has(name)) continue;
+        const len = Array.from(name).length;
+        let strong = 0;
+        for (const pos of positions) {
+            const after = chars.slice(pos + len, pos + len + 3).join('');
+            if (NAME_ACTION.some(a => after.startsWith(a))) strong++;
+        }
+        scored.push({ name, total: positions.length, strong });
+    }
+
+    // 「李青」是「李青云」的前缀，后者信号不弱时把短的丢掉，避免切出半个名字
+    const kept = scored.filter(a => !scored.some(b =>
+        b.name !== a.name && b.name.startsWith(a.name) && b.strong >= a.strong && b.total >= a.total
+    ));
+
+    return kept
+        .filter(x => x.strong >= 2 || (x.strong >= 1 && x.total >= 3))
+        .sort((a, b) => b.strong - a.strong || b.total - a.total)
+        .slice(0, 8);
+}
+
+async function checkChapterNames(novelId, chapterNum) {
+    try {
+        const chapter = await novelManager.getChapter(novelId, chapterNum);
+        if (!chapter || !chapter.content) { ui.showToast('本章还没有正文'); return; }
+        const chars = await novelManager.listCharacters(novelId);
+        const known = (chars || []).map(c => c.name).filter(Boolean);
+        const found = detectUnknownNames(chapter.content, known);
+
+        if (!found.length) {
+            ui.showToast('正文里的人名都在角色库里了', 3000);
+            return;
+        }
+
+        window.__nameCandidates = found;
+        const body = `
+            <div class="name-check-note">正文里有 ${found.length} 个名字不在角色库。
+            加进去之后，续写时 AI 才会把他们当"认识的人"写。</div>
+            <div class="name-check-list">
+                ${found.map((f, i) => `
+                    <label class="name-check-item">
+                        <input type="checkbox" class="name-check-box" data-idx="${i}" checked>
+                        <span class="name-check-name">${escapeHtml(f.name)}</span>
+                        <span class="name-check-count">出现 ${f.total} 次</span>
+                    </label>`).join('')}
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline" onclick="closeModal()">取消</button>
+                <button class="btn btn-primary" onclick="addNamesToCharacters('${escapeJs(novelId)}', ${chapterNum})">加入角色库</button>
+            </div>`;
+        createModal('人名检查 · 第' + chapterNum + '章', body).show();
+    } catch (e) {
+        ui.showToast('检查失败：' + e.message);
+    }
+}
+
+async function addNamesToCharacters(novelId, chapterNum) {
+    const list = window.__nameCandidates || [];
+    const picked = [];
+    document.querySelectorAll('.name-check-box').forEach(c => {
+        if (c.checked) picked.push(Number(c.dataset.idx));
+    });
+    if (!picked.length) { ui.showToast('一个都没选'); return; }
+
+    let added = 0;
+    try {
+        for (const i of picked) {
+            const it = list[i];
+            if (!it) continue;
+            await novelManager.createCharacter(novelId, {
+                name: it.name,
+                role: '配角',
+                description: `第 ${chapterNum} 章正文里出现过 ${it.total} 次，待补充设定`
+            });
+            added++;
+        }
+        closeModal();
+        window.__nameCandidates = null;
+        ui.showToast(`已加入 ${added} 个角色，可以到角色卡里补充设定`);
+    } catch (e) {
+        ui.showToast('加入失败：' + e.message);
+    }
 }
 
 // ===== 章节体检（纯本地，不调用模型）=====
