@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.18.6',   // 与 package.json 保持一致
+    VERSION: '2.18.7',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -14,11 +14,30 @@ const CONFIG = {
 
 // ===== IndexedDB Store =====
 const db = {
-    async open() {
-        return new Promise((resolve, reject) => {
+    // 连接复用。indexedDB.open() 每调用一次都会新建一条连接，而且浏览器不会自动回收，
+    // 旧实现里每个 db.get / db.put 都 open 一次，翻几十章就能堆出上百条连接，
+    // 轻则内存涨，重则新连接被拒（浏览器对同源连接数有上限）。
+    // 这里缓存 Promise，全局只开一次。
+    _openPromise: null,
+    open() {
+        if (this._openPromise) return this._openPromise;
+        this._openPromise = new Promise((resolve, reject) => {
             const request = indexedDB.open(CONFIG.DB_NAME, CONFIG.DB_VERSION);
-            request.onerror = () => reject(request.error);
-            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => {
+                this._openPromise = null;
+                reject(request.error);
+            };
+            request.onsuccess = () => {
+                const database = request.result;
+                // 另一个标签页要升级版本时会触发 versionchange，必须让出连接，
+                // 否则那边会一直卡在 blocked。让出后清掉缓存，下次重新打开。
+                database.onversionchange = () => {
+                    try { database.close(); } catch (_) {}
+                    this._openPromise = null;
+                };
+                database.onclose = () => { this._openPromise = null; };
+                resolve(database);
+            };
             request.onupgradeneeded = (e) => {
                 const db = e.target.result;
                 if (!db.objectStoreNames.contains('novels')) {
@@ -71,6 +90,7 @@ const db = {
                 }
             };
         });
+        return this._openPromise;
     },
 
     // 主键为空时 IndexedDB 会直接抛 "No key or key range specified"，
@@ -459,6 +479,10 @@ async function buildLayeredContext(novelId, chapterNum, hintText = '') {
 }
 
 // ===== AI API Client =====
+// 空闲超时：不是总时长，而是「等不到下一段数据」的上限。长章节慢慢吐字不会被误杀，
+// 真正卡住 120 秒才断。
+const AI_IDLE_TIMEOUT = 120000;
+
 const ai = {
     // opts.searchPayload：由「查资料」模块传入的服务端联网参数（如 enable_search / tools），
     // 不属于 OpenAI 标准字段，只有显式开启联网时才合并进去，避免影响普通请求。
@@ -507,19 +531,51 @@ const ai = {
         };
         if (opts && opts.searchPayload) Object.assign(body, opts.searchPayload);
 
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${config.apiKey}`
-            },
-            body: JSON.stringify(body),
-            signal: signal || undefined
-        });
+        // 超时保护。旧实现完全裸奔：服务商连接挂死时界面永远转圈，只能杀进程重开。
+        // 这里用空闲超时 + 外部取消信号（用户点「停止」）合并成一个 controller。
+        const ctrl = new AbortController();
+        let watchdog = null;
+        const armWatchdog = () => {
+            if (watchdog) clearTimeout(watchdog);
+            watchdog = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, AI_IDLE_TIMEOUT);
+        };
+        if (signal) {
+            if (signal.aborted) ctrl.abort();
+            else signal.addEventListener('abort', () => { try { ctrl.abort(); } catch (_) {} }, { once: true });
+        }
+
+        let response;
+        armWatchdog();
+        try {
+            response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${config.apiKey}`
+                },
+                body: JSON.stringify(body),
+                signal: ctrl.signal
+            });
+        } catch (e) {
+            if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+            // 外部取消优先报「已取消」，别把用户主动停止说成超时
+            if (signal && signal.aborted) throw new Error('已取消');
+            if (ctrl.signal.aborted) throw new Error(`请求超时（${AI_IDLE_TIMEOUT / 1000} 秒无响应），请检查网络或 Base URL`);
+            throw new Error('网络请求失败：' + (e && e.message ? e.message : '未知错误'));
+        }
+        // 非流式到这里响应已完整，不用再等
+        if (!onStream && watchdog) { clearTimeout(watchdog); watchdog = null; }
 
         if (!response.ok) {
-            const error = await response.text();
-            throw new Error(`API Error ${response.status}: ${error}`);
+            const raw = await response.text().catch(() => '');
+            // 直接把响应体抛给用户，经常是一大段 JSON，看不出哪错了。先翻译成人话。
+            let hint = '';
+            if (response.status === 401) hint = 'API Key 无效或已过期，请到设置里重新填写';
+            else if (response.status === 403) hint = '没有权限：Key 受限、模型未开通或余额不足';
+            else if (response.status === 404) hint = `接口地址可能不对：${url}`;
+            else if (response.status === 429) hint = '请求太频繁或额度用尽，等一会儿再试';
+            else if (response.status >= 500) hint = '模型服务端故障，稍后重试';
+            throw new Error(`API 请求失败（${response.status}）${hint ? '：' + hint : ''}${raw ? '\n' + raw.slice(0, 200) : ''}`);
         }
 
         if (onStream && response.body) {
@@ -545,22 +601,32 @@ const ai = {
                 }
             };
 
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    // 每收到一段就重新计时：只要模型还在吐字，就不会被超时打断
+                    armWatchdog();
 
-                buffer += decoder.decode(value, { stream: true });
+                    buffer += decoder.decode(value, { stream: true });
 
-                // 关键：按行消费，未闭合的半行留在 buffer 里等下一个数据包。
-                // 旧实现直接对每个 chunk 做 split，行被网络切开时两半都解析失败，正文整段丢失。
-                let idx;
-                while ((idx = buffer.indexOf('\n')) >= 0) {
-                    handleLine(buffer.slice(0, idx));
-                    buffer = buffer.slice(idx + 1);
+                    // 关键：按行消费，未闭合的半行留在 buffer 里等下一个数据包。
+                    // 旧实现直接对每个 chunk 做 split，行被网络切开时两半都解析失败，正文整段丢失。
+                    let idx;
+                    while ((idx = buffer.indexOf('\n')) >= 0) {
+                        handleLine(buffer.slice(0, idx));
+                        buffer = buffer.slice(idx + 1);
+                    }
                 }
+                if (buffer.trim()) handleLine(buffer);
+                return fullContent;
+            } catch (e) {
+                if (signal && signal.aborted) throw new Error('已取消');
+                if (ctrl.signal.aborted) throw new Error(`生成超时（${AI_IDLE_TIMEOUT / 1000} 秒没有新数据），已中断`);
+                throw e;
+            } finally {
+                if (watchdog) { clearTimeout(watchdog); watchdog = null; }
             }
-            if (buffer.trim()) handleLine(buffer);
-            return fullContent;
         } else {
             const data = await response.json();
             return data.choices?.[0]?.message?.content || '';
@@ -914,6 +980,13 @@ const novelManager = {
     },
 
     async getChapter(novelId, chapterNum) {
+        if (!novelId) return null;
+        // 章节主键就是 `${novelId}_ch${number}`（见 saveChapter），直接按主键取，
+        // 不用把整本书的章节拉出来再 find。旧实现是 O(n)，编辑长篇小说时
+        // 每敲一次自动保存前的读、每次翻章都要扫全书。
+        const direct = await db.get('chapters', `${novelId}_ch${chapterNum}`);
+        if (direct) return direct;
+        // 兜底：极早期版本可能存在 id 规则不同的老数据，扫一遍保证还能打开
         const chapters = await this.listChapters(novelId);
         return chapters.find(ch => ch.number === chapterNum);
     },
@@ -968,6 +1041,17 @@ const novelManager = {
         await db.delete('chapters', id);
         const versions = await this.listChapterVersions(novelId, chapterNum);
         for (const v of versions) await db.delete('versions', v.id);
+
+        // 同步作品统计。删章以前只删记录，chapterCount / wordCount 还留着旧值，
+        // 书架上的「共 N 章 · X 万字」会一直虚高，导入的旧稿删掉几章后尤其明显。
+        const novel = await this.get(novelId);
+        if (novel) {
+            const chapters = await this.listChapters(novelId);
+            novel.chapterCount = chapters.length;
+            novel.wordCount = chapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0);
+            novel.updated = Date.now();
+            await db.put('novels', novel);
+        }
     },
 
     // ===== 分卷（v2.10.1）=====
@@ -1556,7 +1640,18 @@ function navigateTo(page, params = {}, isRootTab = false) {
         foreshadowingEdit: (view) => renderForeshadowingEdit(params.novelId, params.foreshadowingId, view)
     };
 
-    if (renderers[page]) renderers[page](view);
+    if (renderers[page]) {
+        renderers[page](view);
+    } else {
+        // 未注册的 page 名，旧代码只会创建一个空 div，用户看到的是整页白屏、
+        // 也没有任何返回入口（只能杀进程重开）。这里给可读提示 + 返回按钮。
+        ui.setPageTitle('页面不存在');
+        view.innerHTML = `<div class="empty-state">
+            <div class="empty-title">这个页面不存在</div>
+            <div class="empty-desc">「${escapeHtml(String(page))}」可能已下线或链接不完整</div>
+            <button class="btn btn-primary" style="margin-top:16px;" onclick="goBack()">返回上一页</button>
+        </div>`;
+    }
     stripButtonEmoji(view);
     window.scrollTo(0, 0);
 }
@@ -1890,16 +1985,29 @@ async function sendMessage() {
 
     try {
         let fullText = '';
+        // 流式渲染节流：旧实现每个 chunk 都重写整块 innerHTML，一段 4 万字的回复
+        // 会重排上千次（O(n²)），手机上直接卡死。这里 80ms 合并一次，
+        // 最终版本由下面的完成渲染兜底，所以节流不会丢内容。
+        let paintTimer = null;
+        const paintStream = () => {
+            paintTimer = null;
+            if (!fullText) return;
+            const parsed = parseSettingBlocks(fullText);
+            aiLoading.innerHTML = `<div class="msg-bubble ai">${escapeHtml(parsed.clean).replace(/\n/g, '<br>')}</div>`;
+            messagesBox.scrollTop = messagesBox.scrollHeight;
+        };
         const response = await ai.chat([
             { role: 'system', content: systemPrompt },
             { role: 'user', content: text }
         ], (chunk, full) => {
             fullText = full;
-            // 流式期间先渲染干净文本（设定块在完成后才卡片化）
-            const parsed = parseSettingBlocks(fullText);
-            aiLoading.innerHTML = `<div class="msg-bubble ai">${escapeHtml(parsed.clean).replace(/\n/g, '<br>')}</div>`;
-            messagesBox.scrollTop = messagesBox.scrollHeight;
+            // 排队中就不再追加定时器
+            if (!paintTimer) paintTimer = setTimeout(paintStream, 80);
         }, 4000);
+
+        // 关键：先取消还在排队的流式渲染，否则它可能在下面带设定卡的最终渲染之后执行，
+        // 把卡片覆盖成纯文本。
+        if (paintTimer) { clearTimeout(paintTimer); paintTimer = null; }
 
         if (!fullText) fullText = response;
         // 完成后：拆分正文与设定块，渲染可沉淀设定卡
@@ -4837,7 +4945,7 @@ async function showModelConfigModal() {
                 <option value="gpt-4o" ${modelValue==='gpt-4o'?'selected':''}>GPT-4o</option>
                 <option value="gpt-4" ${modelValue==='gpt-4'?'selected':''}>GPT-4</option>
                 <option value="gpt-3.5-turbo" ${modelValue==='gpt-3.5-turbo'?'selected':''}>GPT-3.5 Turbo</option>
-                <option value="claude-3.5-sonnet" ${modelValue==='claude-3.5-sonnet'?'selected':''}>Claude 3.5 Sonnet</option>
+                <option value="claude-3.5-sonnet" ${modelValue==='claude-3.5-sonnet'?'selected':''}>Claude 3.5 Sonnet（需兼容网关）</option>
                 <option value="custom" ${modelValue==='custom'?'selected':''}>自定义模型名</option>
             </select></div>
             <div id="custom-model-row" style="display:${isCustom?'block':'none'};"><label style="display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500;">模型名</label>
@@ -4867,6 +4975,16 @@ async function configureModel() {
     }
 
     if (!apiKey) { ui.showToast('请输入 API Key'); return; }
+
+    // Anthropic 官方接口是 /v1/messages + x-api-key，和本应用使用的 OpenAI 兼容格式对不上。
+    // 选了 Claude 却把地址留空或填 api.anthropic.com，请求必然 404，而报错发生在保存之后，
+    // 用户会误以为是 Key 的问题。保存前先说明。
+    if (/^claude/i.test(model)) {
+        const target = (baseUrl || '').toLowerCase();
+        if (!baseUrl || target.includes('anthropic.com')) {
+            ui.showToast('Claude 要填 OpenAI 兼容网关地址（如 OpenRouter），Anthropic 官方接口不兼容', 5200);
+        }
+    }
 
     try {
         const providerMap = {
@@ -7687,9 +7805,11 @@ const agentSession = {
         this.history = [];
         try {
             const saved = await db.get('settings', `agent_${novelId}`);
-            if (saved && saved.v) {
-                this.messages = saved.v.messages || [];
-                this.history = saved.v.history || [];
+            // 兼容两种写法：早期存的是 {key, v}，统一后是 {key, value}
+            const data = saved ? (saved.value || saved.v) : null;
+            if (data) {
+                this.messages = data.messages || [];
+                this.history = data.history || [];
             }
         } catch (_) {}
     },
@@ -7697,7 +7817,12 @@ const agentSession = {
     async save() {
         if (!this.novelId) return;
         try {
-            await db.put('settings', { key: `agent_${this.novelId}`, v: { messages: this.messages.slice(-30), history: this.history.slice(-20) } });
+            const payload = { messages: this.messages.slice(-30), history: this.history.slice(-20) };
+            // 统一到 settings 的 {key, value} 约定。之前这里只写 {key, v}，
+            // 而 settings.get/set 及备份逻辑认的是 value，两边对不上——
+            // 表现就是「Agent 会话在备份/恢复后消失」，但其实是根本读不到。
+            // v 保留一份，老版本代码回退时还能读。
+            await db.put('settings', { key: `agent_${this.novelId}`, value: payload, v: payload });
         } catch (_) {}
     },
 

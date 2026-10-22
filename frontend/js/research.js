@@ -186,36 +186,6 @@ async function buildSearchChain(mode, cfg) {
     return chain;
 }
 
-async function researchSearch(query) {
-    const { mode, cfg } = await resolveSearchMode();
-    const chain = await buildSearchChain(mode, cfg);
-    if (!chain.length) throw new Error('当前模型没有联网能力，需要配一个搜索 API 或备用搜索');
-
-    const errors = [];
-    for (let i = 0; i < chain.length; i++) {
-        const step = chain[i];
-        try {
-            const hits = step.kind === 'builtin'
-                ? await researchSearchBuiltin(query)
-                : await researchSearchApi(query, step);
-            if (hits && hits.length) {
-                if (i > 0) {
-                    // 用了后面的路：告诉用户主搜索挂了，但写作没被打断
-                    ui.showToast(`主搜索不可用，已自动切到「${step.label}」`, 3200);
-                }
-                return hits;
-            }
-            errors.push(`${step.label}：没有结果`);
-        } catch (e) {
-            errors.push(`${step.label}：${e.message}`);
-            if (i + 1 < chain.length) {
-                ui.showToast(`「${step.label}」不可用，正在换下一个…`, 2000);
-            }
-        }
-    }
-    throw new Error('所有检索方式都失败了（' + errors.join('；') + '）');
-}
-
 // DeepSeek 的联网搜索：一次请求内完成 search → open_page → 回答。
 // 结果不可见（服务端注入），但 open_page 的 URL 会回传，可以当来源。
 // 直接用用户配置的模型，不偷换：能走到这里说明模型名带 v4（见 buildBuiltinSearchPayload），
