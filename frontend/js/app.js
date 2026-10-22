@@ -12,6 +12,19 @@ const CONFIG = {
     DB_VERSION: 8
 };
 
+// 供应商展示名。只影响界面文字，请求实际发往哪里完全由 baseUrl + model 决定，
+// 不要拿它做路由——同一个模型名可以挂在任何 OpenAI 兼容网关下（OpenRouter 等）。
+// 以前这段映射在设置页和保存逻辑里各写了一遍，改一处漏一处。
+const PROVIDER_MAP = { glm: '智谱', deepseek: 'DeepSeek', gpt: 'OpenAI', claude: 'Anthropic' };
+function detectProvider(model) {
+    if (!model) return 'custom';
+    const m = String(model).toLowerCase();
+    for (const [prefix, name] of Object.entries(PROVIDER_MAP)) {
+        if (m.startsWith(prefix)) return name;
+    }
+    return 'custom';
+}
+
 // ===== IndexedDB Store =====
 const db = {
     // 连接复用。indexedDB.open() 每调用一次都会新建一条连接，而且浏览器不会自动回收，
@@ -2344,7 +2357,7 @@ async function runNameGenerator() {
                         <div class="ng-meta">${escapeHtml(n.style || '')}</div>
                         <div class="ng-reason">${escapeHtml(n.reason || '')}</div>
                     </div>
-                    <button class="btn btn-outline btn-sm" onclick="copyName('${escapeHtml((n.name || '').replace(/'/g, "\\'"))}')">复制</button>
+                    <button class="btn btn-outline btn-sm" onclick="copyName('${escapeJs(n.name)}')">复制</button>
                 </div>
             `).join('');
         }
@@ -3983,19 +3996,6 @@ async function renderSettings(container) {
     // 更新模型配置显示
     const displayEl = document.getElementById('model-config-display');
     if (displayEl) {
-        const providerMap = {
-            'glm': '智谱',
-            'deepseek': 'DeepSeek',
-            'gpt': 'OpenAI',
-            'claude': 'Anthropic'
-        };
-        const detectProvider = (model) => {
-            if (!model) return 'custom';
-            for (const [prefix, name] of Object.entries(providerMap)) {
-                if (model.toLowerCase().startsWith(prefix)) return name;
-            }
-            return 'custom';
-        };
         const friendlyProvider = detectProvider(config.model);
         const hasKey = config.apiKey ? '<span class="status-dot ok"></span>已配置' : '<span class="status-dot err"></span>未配置';
         displayEl.innerHTML = `${friendlyProvider} · ${config.model || '未选'} ${hasKey}`;
@@ -5045,24 +5045,12 @@ async function configureModel() {
     }
 
     try {
-        const providerMap = {
-            'glm': '智谱',
-            'deepseek': 'DeepSeek',
-            'gpt': 'OpenAI',
-            'claude': 'Anthropic'
-        };
-        const detectProvider = (model) => {
-            if (!model) return 'custom';
-            for (const [prefix, name] of Object.entries(providerMap)) {
-                if (model.toLowerCase().startsWith(prefix)) return name;
-            }
-            return 'custom';
-        };
         const friendlyProvider = detectProvider(model);
         const hasKey = apiKey ? ' ✅已配置' : ' ❌未配置';
         const displayText = `${friendlyProvider} · ${model || '未选'}${hasKey}`;
         
         await settings.setModelConfig({
+            // provider 只用于设置页回显，判断走哪个接口一律看 baseUrl
             provider: friendlyProvider,
             model,
             apiKey,
@@ -5164,6 +5152,25 @@ function makeId(prefix) {
 // 属性值转义：escapeHtml 已覆盖引号，这里再挡一下反引号，供 onclick/option 等属性用
 function escapeAttr(str) {
     return escapeHtml(str).replace(/`/g, '&#96;');
+}
+
+// 内联 onclick 的字符串参数专用，不能拿 escapeHtml 顶替。
+// escapeHtml 把 ' 转成 &#39;，但浏览器解析属性值时会把它解码回一个裸单引号，
+// 最终进 JS 的仍是 fn('O'Brien') —— 字符串被截断，按钮点不动（甚至可被构造成注入）。
+// 这里直接输出 JS 转义序列；HTML 特殊字符另外处理，保证属性本身不被提前闭合。
+function escapeJs(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/\r/g, '\\r')
+        .replace(/\n/g, '\\n')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
 }
 
 // ===== 使用教程 =====
@@ -7817,7 +7824,7 @@ function showAiReaderReport(novelId, chapterNum, report, rawText) {
             </div>
             <div class="reader-actions">
                 <button class="btn btn-primary btn-block" onclick="aiReaderRewrite('${novelId}', ${chapterNum})">✨ 一键采纳建议并重写</button>
-                <button class="btn btn-outline btn-block" style="margin-top:8px;" onclick="showRawReaderOutput('${escapeHtml(rawText?.substring(0, 800) || '')}')">📄 查看原始输出</button>
+                <button class="btn btn-outline btn-block" style="margin-top:8px;" onclick="showRawReaderOutput('${escapeJs(rawText?.substring(0, 800) || '')}')">📄 查看原始输出</button>
             </div>
         </div>`;
     createModal('🎭 AI读者分析报告', html);
@@ -8256,6 +8263,10 @@ async function renderConsistencyCheck(container, novelId) {
     ui.showLoading(container);
     try {
         const { index, chapterCount } = await consistencyScanBook(novelId);
+        // 是否有可撤销的批量替换（只保留最近一次，见 consistencyReplaceExecute）
+        const replaceBackup = await settings.get(REPLACE_BACKUP_KEY, null);
+        const canUndo = !!(replaceBackup && replaceBackup.novelId === novelId
+            && Array.isArray(replaceBackup.chapters) && replaceBackup.chapters.length);
         const entities = Object.entries(index).sort((a, b) => b[1].total - a[1].total);
         const knownEntities = entities.filter(([name]) => {
             return name.length >= 2;
@@ -8283,6 +8294,10 @@ async function renderConsistencyCheck(container, novelId) {
                     <button class="btn btn-primary" onclick="consistencyReplacePreview('${novelId}')">预览</button>
                 </div>
                 <div id="consistency-replace-result"></div>
+                ${canUndo ? `<div class="consistency-undo">
+                    <button class="btn btn-outline btn-sm" onclick="undoLastReplace('${escapeJs(novelId)}')">撤销上次替换（${replaceBackup.chapters.length} 章）</button>
+                    <span class="consistency-undo-hint">${escapeHtml(replaceBackup.oldText)} → ${escapeHtml(replaceBackup.newText)}</span>
+                </div>` : ''}
 
                 <div class="consistency-section-title">🗂 实体索引表（点击展开出现章节）</div>
                 <div id="consistency-entity-list"></div>
@@ -8359,7 +8374,7 @@ async function consistencyRunAI(novelId) {
                             <div class="consistency-issue-main">规范名：<b>${escapeHtml(v.canonical || '?')}</b> · 别名：${(v.aliases || []).map(a => `<span class="consistency-alias">${escapeHtml(a)}</span>`).join(' ')}</div>
                             ${v.evidence ? `<div class="consistency-issue-evidence">${escapeHtml(v.evidence)}</div>` : ''}
                             <div class="consistency-issue-actions">
-                                <button class="btn btn-sm btn-primary" onclick="consistencyQuickReplace('${novelId}', '${escapeHtml((v.aliases || [])[0] || '')}', '${escapeHtml(v.canonical || '')}')">统一为规范名</button>
+                                <button class="btn btn-sm btn-primary" onclick="consistencyQuickReplace('${escapeJs(novelId)}', '${escapeJs((v.aliases || [])[0] || '')}', '${escapeJs(v.canonical || '')}')">统一为规范名</button>
                             </div>
                         </div>`).join('')}
                 </div>` : ''}
@@ -8417,10 +8432,43 @@ async function consistencyReplacePreview(novelId) {
             <div class="consistency-replace-preview">
                 <div class="consistency-replace-info">将替换 <b>${totalOccur}</b> 处，影响 <b>${affected}</b> 章</div>
                 <div class="consistency-replace-snippets">${previews.slice(0, 8).join('<br>')}${previews.length > 8 ? `<br>…共${previews.length}处示例` : ''}</div>
-                <button class="btn btn-danger" onclick="consistencyReplaceExecute('${novelId}', '${escapeHtml(oldText)}', '${escapeHtml(newText)}', ${affected})">⚠️ 确认替换全部 ${totalOccur} 处</button>
+                <button class="btn btn-danger" onclick="consistencyReplaceExecute('${escapeJs(novelId)}', '${escapeJs(oldText)}', '${escapeJs(newText)}', ${affected})">⚠️ 确认替换全部 ${totalOccur} 处</button>
             </div>`;
     } catch (e) {
         box.innerHTML = `<div class="consistency-error">❌ ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+// 批量替换的原文备份。只存命中的章节，且只保留最近一次：
+// versions 表按章存快照会随批量操作膨胀（一次替换 100 章就是 100 份全文），
+// 这里用一个独立键控制体积，能撤销「刚做的那一次」就够。
+const REPLACE_BACKUP_KEY = 'replaceBackup';
+
+async function undoLastReplace(novelId) {
+    const backup = await settings.get(REPLACE_BACKUP_KEY, null);
+    if (!backup || backup.novelId !== novelId || !Array.isArray(backup.chapters) || !backup.chapters.length) {
+        ui.showToast('没有可撤销的替换记录');
+        return;
+    }
+    if (!confirm(`撤销「${backup.oldText}」→「${backup.newText}」？将恢复 ${backup.chapters.length} 章的原文。`)) return;
+    try {
+        for (const saved of backup.chapters) {
+            const cur = await db.get('chapters', saved.id);
+            if (!cur) continue;   // 章节已被删掉就跳过，不要凭空造回来
+            await db.put('chapters', Object.assign({}, cur, {
+                content: saved.content,
+                wordCount: saved.wordCount != null ? saved.wordCount : saved.content.length,
+                updated: Date.now()
+            }));
+        }
+        await novelManager.recountNovelStats(novelId);
+        // 用完即清：留着容易被误点，把之后新写的内容一起覆盖回去
+        await settings.set(REPLACE_BACKUP_KEY, null);
+        ui.showToast(`已恢复 ${backup.chapters.length} 章原文`);
+        const view = document.getElementById('page-consistencyCheck');
+        if (store.currentPage === 'consistencyCheck' && view) renderConsistencyCheck(view, novelId);
+    } catch (e) {
+        ui.showToast('撤销失败: ' + e.message);
     }
 }
 
@@ -8428,6 +8476,17 @@ async function consistencyReplaceExecute(novelId, oldText, newText, affected) {
     if (!confirm(`确认将「${oldText}」替换为「${newText}」？将影响 ${affected} 个章节，此操作不可撤销。`)) return;
     try {
         const chapters = await novelManager.listChapters(novelId);
+        // 先备份原文再动手：批量替换是多章一次性改写，没有逐章 undo 栈。
+        // 只存命中的章节，覆盖上一条备份（只保留最近一次）。
+        const backupChapters = chapters
+            .filter(ch => (ch.content || '').includes(oldText))
+            .map(ch => ({ id: ch.id, number: ch.number, title: ch.title, content: ch.content, wordCount: ch.wordCount }));
+        if (backupChapters.length) {
+            await settings.set(REPLACE_BACKUP_KEY, {
+                novelId, oldText, newText, at: Date.now(), chapters: backupChapters
+            });
+        }
+
         let done = 0;
         for (const ch of chapters) {
             if (!(ch.content || '').includes(oldText)) continue;
