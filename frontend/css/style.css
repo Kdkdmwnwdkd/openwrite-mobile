@@ -5054,3 +5054,10 @@ body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary
     border-color: rgba(245, 158, 11, 0.45);
     background: rgba(245, 158, 11, 0.08);
 }
+
+/* 技能评分：说明这个分数怎么读（不同技能方向可能相反） */
+.score-meaning {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 4px;
+}

@@ -174,8 +174,94 @@ const BUILTIN_SKILLS = [
 ### 润色后：
 
 林九推开门，潮气扑面而来。霉味混着铁锈味，熏得太阳穴发胀。他站在门口没动，直到眼睛适应黑暗——沙发轮廓像伏着的兽。指尖擦过茶几，厚厚一层灰。脚步声在空旷里显得格外大。他摸到那把刀，刀柄上的旧刻痕还在。很好。他攥紧了它，往更深处走去。`
+    },
+    {
+        id: 'taste-upgrade',
+        name: '审美升级',
+        icon: '🎨',
+        enabled: true,
+        category: '文笔提升',
+        version: 'v1.0',
+        description: '六个可观察维度的审美诊断（细节选择 / 句式节奏 / 留白 / 意象具体度 / 感官层次 / 叙述距离）。每处问题必须给「原文 → 改后」对照，不给"建议加强细节"这类空话。',
+        content: `# 审美升级 Skill
+## 定位：不找"假"（那是去AI味的事），只找"低"
+## 核心判断：审美不是用词华丽，是**选择的精度**——在无数种写法里挑出唯一准确的那个。
+
+---
+
+## 一、六个维度（逐项检查，每项都要有原文证据）
+
+### 1. 细节选择：写「有信息量的细节」，不写「通用细节」
+- 通用细节 = 换成任何人任何场景都成立：「他穿着一件白衬衫」「她有一双大眼睛」
+- 有信息量 = 只属于这个人、这一刻：「白衬衫第三颗扣子掉了，用黑线胡乱缝过」
+- 检查方法：把细节里的名词换掉，句子依然通顺 → 说明它没承担任何信息
+
+### 2. 句式节奏：句子长度就是呼吸
+- 全篇都是 20 字左右的句子 = 匀速，读起来像说明书
+- 长句铺陈、短句收束：关键处用一个 3-5 字的短句，节奏立刻断
+- 反例：「他推开门，看到房间里一片狼藉，心中不禁涌起一阵悲凉。」
+- 正例：「他推开门。一地碎瓷。」
+- 检查方法：连续三段平均句长差值小于 5 字 → 节奏是死的
+
+### 3. 留白：该省的省掉，让读者自己补
+- 情绪说透 = 替读者感受，读者反而不感受
+- 反例：「他很后悔，后悔自己当初的决定。」
+- 正例：「他站在原地，烟烧到了手指。」
+- 原则：能用一个动作替代的情绪，不要用形容词
+
+### 4. 意象具体度：抽象情绪 → 可感之物
+- 反例：「她感到绝望。」
+- 正例：「她把手机翻过来扣在桌上。屏幕亮着，一直亮着。」
+- 检查方法：搜出所有「感到 / 觉得 / 心中涌起」，每出现一次就是一处抽象
+
+### 5. 感官层次：别只写眼睛
+- 视觉信息密度最低，嗅觉 / 触觉 / 温度 / 声音更能建立现场
+- 反例：「房间里很乱。」
+- 正例：「霉味混着廉价香薰，熏得太阳穴发胀。」
+- 原则：一段场景描写至少换两种感官
+
+### 6. 叙述距离：镜头离人物多远
+- 远：冷静、克制、旁观者记录 → 适合冷峻、宿命感
+- 近：贴着人物呼吸，带他的偏见与误判 → 适合紧张、共情
+- 常见错误：全篇固定在一个距离。冲突该近不近，过场该远不远
+
+---
+
+## 二、输出规则
+1. 六个维度各给 1-5 分，**必须附一句原文证据**；没有证据的分不算
+2. 只挑最值得改的 2-3 处（不是全部），给「原文 → 改后」对照
+3. 改写示范必须：不改剧情、不改人物、只改表达，字数与原文相当
+4. 禁止输出「建议加强细节」「语言可以更精炼」「人物更丰满」——这类话没有信息量
+
+---
+
+## 三、改写示范
+
+### 原文
+李青云走进大殿，心中充满了震撼。这座宫殿十分宏伟，巨大的柱子支撑着穹顶，墙壁上雕刻着精美的图案。他感到自己十分渺小，同时也感到一股使命感涌上心头。
+
+### 改后
+李青云跨进门槛，脚下的石板是凉的。
+柱子有十人合抱那么粗，抬头看不见顶——光从很高的地方漏下来，在柱身上切出一道一道斜影。
+他站了一会儿，才想起自己是来做什么的。
+
+### 改了什么
+- 「心中充满震撼」→ 删，用「站了一会儿才想起」让读者自己感到震慑
+- 「十分宏伟 / 精美」→ 换成可测量的（十人合抱、看不见顶）
+- 「渺小 + 使命感」两个抽象词 → 删，用一句落差替代
+- 句式 10 / 38 / 14 字，不是匀速
+
+---
+
+## 四、自检
+- [ ] 还有「感到 / 觉得 / 心中涌起」吗？有就换
+- [ ] 连续三段句长是否接近？接近就打断
+- [ ] 细节能套到别人身上吗？能就是没信息量
+- [ ] 场景里有几种感官？只有视觉就加一种
+- [ ] 冲突处的叙述距离比过场更近吗？`
     }
 ];
+
 
 // ===== Skill 管理器 =====
 const skillManager = {
@@ -234,7 +320,9 @@ const deAiEngine = {
      * 构建审查 System Prompt（嵌入完整 Skill 规则）
      */
     buildReviewSystemPrompt(skill) {
-        return `你是资深中文小说编辑，精通"去AI味"写作技艺。你将使用以下完整技能规则，对用户提供的小说文本进行逐段审查。
+        // 通用引擎：诊断维度完全由技能的 content 决定，这里不写死任何具体清单。
+        // 以前这段硬编码了"去AI味 8 种症状"，导致加进第二个技能也只会按去AI味审。
+        return `你是资深中文小说编辑。下面是一套完整的技能规则，请严格按它审查用户提供的小说文本。
 
 ===== 技能定义 =====
 《${skill.name}》${skill.version}
@@ -242,27 +330,27 @@ ${skill.content}
 ===== 技能结束 =====
 
 【你的任务】
-1. 通读全文，按照技能中的"AI味典型症状诊断清单"（8种症状）逐段诊断；
-2. 找出文中所有存在AI味的段落/句子；
-3. 对每一处问题，输出：问题原文摘录、属于哪种症状、为什么是AI味、具体如何修正（可给出改写示范）；
-4. 最后对照"快速自检表"给全文打分评级。
+1. 严格按技能里定义的检查维度逐段诊断。不要自己另立标准，也不要套用技能之外的清单。
+2. 每处问题输出：原文精确摘录、属于哪个维度、为什么是问题、具体怎么改；能改写就给一段可直接替换的文字。
+3. 最后按技能定义的评分方式给全文一个总评。
 
 【严格输出要求】
-只输出 JSON 对象，不要输出任何其他文字、Markdown 代码块标记或注释，格式如下：
+只输出 JSON 对象，不要输出任何其他文字、Markdown 代码块标记或注释：
 {
-  "score": 0-100 的整数（AI味浓度，越高AI味越重）,
-  "verdict": "评级：AI味基本清除 / 仍有轻微AI味 / 有明显AI味 / AI味很重，建议重写",
+  "score": 0-100 的整数（含义按技能定义，可能是"问题浓度"也可能是"文本水平"）,
+  "scoreMeaning": "一句话说明这个分数怎么读：越高越好，还是越高越差",
+  "verdict": "总评，一句话",
   "issues": [
     {
-      "quote": "原文中问题句子的精确摘录（尽量逐字）",
-      "symptom": "症状名称（如：标签化情感症）",
-      "explain": "为什么这是AI味，简短说明",
-      "fix": "具体修正建议",
+      "quote": "原文中问题句子的精确摘录（逐字，不要改写）",
+      "symptom": "问题类型或维度名（用技能里出现的名称）",
+      "explain": "为什么这是问题，简短说明",
+      "fix": "具体怎么改",
       "rewrite": "改写示范（可选，一段直接可用的替换文字）"
     }
   ],
-  "checklist": [{"item": "自检表条目", "pass": true或false}],
-  "summary": "一段话总结全文AI味情况与修改优先级"
+  "checklist": [{"item": "技能里的自检条目", "pass": true或false}],
+  "summary": "一段话总结与修改优先级"
 }`;
     },
 
@@ -270,7 +358,8 @@ ${skill.content}
      * 构建润色 System Prompt（直接改写全文）
      */
     buildPolishSystemPrompt(skill) {
-        return `你是资深中文小说编辑，精通"去AI味"写作技艺。你将使用以下完整技能规则，对用户提供的小说文本进行全文润色改写。
+        // 同上：改写目标由技能 content 定义，不再写死"消除 8 种症状"
+        return `你是资深中文小说编辑。下面是一套完整的技能规则，请严格按它改写用户提供的小说文本。
 
 ===== 技能定义 =====
 《${skill.name}》${skill.version}
@@ -278,13 +367,13 @@ ${skill.content}
 ===== 技能结束 =====
 
 【你的任务】
-1. 严格对照技能中的8种症状诊断清单与指令A~F，把全文润色成"人类作者手笔"；
-2. 保留原作的剧情、人物、情节走向，只改表达方式；
-3. 重点消除：过度解释、标签化情感、节奏机械、描写同质化、信息倾泻、完美逻辑、感官缺失、人称僵硬；
-4. 保持连贯的叙事与原有的分段结构。
+1. 严格按技能规则改写，不要把技能之外的偏好强加进来。
+2. 保留原作的剧情、人物、情节走向，只改表达方式。
+3. 保持连贯的叙事与原有的分段结构。
+4. 输出完整的改写后正文，不要只给片段或几段示范。
 
 【严格输出要求】
-只输出润色后的完整正文（小说文本本身），不要输出任何解释、前言、点评、Markdown代码块标记或"以下为润色结果"之类的说明文字。`;
+只输出改写后的正文本身，不要解释、不要前言、不要"以下是改写结果"，不要 Markdown 代码块标记。`;
     },
 
     /** 从 AI 返回文本中容错提取 JSON */
@@ -393,7 +482,7 @@ ${skill.content}
             const idx = html.indexOf(q);
             if (idx !== -1) {
                 html = html.slice(0, idx) +
-                    `<mark class="ai-mark" title="${escapeHtml(issue.symptom || 'AI味问题')}">` +
+                    `<mark class="ai-mark" title="${escapeHtml(issue.symptom || '问题')}">` +
                     html.slice(idx, idx + q.length) +
                     `</mark>` +
                     html.slice(idx + q.length);
@@ -576,14 +665,19 @@ function renderReviewResult(result, originalText) {
     let scoreBar = '';
     if (result.score !== null && result.score !== undefined) {
         const pct = Math.max(0, Math.min(100, result.score));
-        const color = pct < 30 ? 'var(--success)' : pct < 60 ? 'var(--warning)' : 'var(--danger)';
+        // 分数方向因技能而异：去AI味是"越高越差"，审美升级是"越高越好"。
+        // 模型会在 scoreMeaning 里说明方向，这里据此决定颜色，不再写死。
+        const higherBetter = /越高越好/.test(result.scoreMeaning || '');
+        const badness = higherBetter ? 100 - pct : pct;
+        const color = badness < 30 ? 'var(--success)' : badness < 60 ? 'var(--warning)' : 'var(--danger)';
         scoreBar = `
             <div class="score-block">
                 <div class="score-row">
-                    <span class="score-label">AI味浓度</span>
-                    <span class="score-value" style="color:${color};">${pct}%</span>
+                    <span class="score-label">评分</span>
+                    <span class="score-value" style="color:${color};">${pct}</span>
                 </div>
                 <div class="score-bar"><div class="score-bar-fill" style="width:${pct}%;background:${color};"></div></div>
+                ${result.scoreMeaning ? `<div class="score-meaning">${escapeHtml(result.scoreMeaning)}</div>` : ''}
                 <div class="score-verdict">${escapeHtml(result.verdict || '')}</div>
             </div>`;
     }
@@ -593,7 +687,7 @@ function renderReviewResult(result, originalText) {
         <div class="issue-item">
             <div class="issue-head">
                 <span class="issue-index">${i + 1}</span>
-                <span class="issue-symptom">${escapeHtml(iss.symptom || 'AI味问题')}</span>
+                <span class="issue-symptom">${escapeHtml(iss.symptom || '问题')}</span>
             </div>
             ${iss.quote ? `<div class="issue-quote">"${escapeHtml(iss.quote)}"</div>` : ''}
             ${iss.explain ? `<div class="issue-explain">${escapeHtml(iss.explain)}</div>` : ''}
