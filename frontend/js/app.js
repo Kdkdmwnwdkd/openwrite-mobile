@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.19.2',   // 与 package.json 保持一致
+    VERSION: '2.19.3',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -1216,21 +1216,30 @@ const novelManager = {
         return await db.getAll('chapters', 'novelId', novelId);
     },
 
+    // 定位一章：正常情况下主键就是 `${novelId}_ch${number}`，直接取。
+    // 但极早期的数据可能用别的 id 规则 —— 那种章节按主键取不到，如果直接新建，
+    // 会得到一个「同号影子章节」（列表里出现两条第 5 章），删除也删不掉原来的。
+    // 所以这里连真实 id 一起返回，写和删都用它。
+    async findChapterKey(novelId, chapterNum) {
+        const directId = `${novelId}_ch${chapterNum}`;
+        const direct = await db.get('chapters', directId);
+        if (direct) return { id: directId, record: direct };
+        const chapters = await this.listChapters(novelId);
+        const legacy = chapters.find(ch => Number(ch.number) === Number(chapterNum));
+        return legacy ? { id: legacy.id, record: legacy } : { id: directId, record: null };
+    },
+
     async getChapter(novelId, chapterNum) {
         if (!novelId) return null;
-        // 章节主键就是 `${novelId}_ch${number}`（见 saveChapter），直接按主键取，
-        // 不用把整本书的章节拉出来再 find。旧实现是 O(n)，编辑长篇小说时
-        // 每敲一次自动保存前的读、每次翻章都要扫全书。
-        const direct = await db.get('chapters', `${novelId}_ch${chapterNum}`);
-        if (direct) return direct;
-        // 兜底：极早期版本可能存在 id 规则不同的老数据，扫一遍保证还能打开
-        const chapters = await this.listChapters(novelId);
-        return chapters.find(ch => ch.number === chapterNum);
+        const found = await this.findChapterKey(novelId, chapterNum);
+        return found.record;
     },
 
     async saveChapter(novelId, chapterNum, title, content, paragraphs = null, opts = {}) {
-        const id = `${novelId}_ch${chapterNum}`;
-        const existing = await db.get('chapters', id);
+        // 用真实记录 id：老数据可能是别的规则，按 `${novelId}_ch${n}` 新建会出影子章节
+        const found = await this.findChapterKey(novelId, chapterNum);
+        const id = found.id;
+        const existing = found.record;
         // 覆盖前自动存档旧版本，AI 写崩或误改后可回滚。
         // 自动保存传 archive:false —— 否则每敲几下就多一份全文快照，很快把配额吃光。
         if (existing && existing.content && existing.content !== content && opts.archive !== false) {
@@ -1295,9 +1304,10 @@ const novelManager = {
     },
 
     async deleteChapter(novelId, chapterNum) {
-        const id = `${novelId}_ch${chapterNum}`;
-        await db.delete('chapters', id);
-        const versions = await this.listChapterVersions(novelId, chapterNum);
+        const found = await this.findChapterKey(novelId, chapterNum);
+        if (!found.record) return;          // 本来就不存在，不要凭空删个空 id
+        await db.delete('chapters', found.id);
+        const versions = await db.getAll('versions', 'chapterId', found.id);
         for (const v of versions) await db.delete('versions', v.id);
 
         // 同步作品统计。删章以前只删记录，chapterCount / wordCount 还留着旧值，
@@ -1493,8 +1503,10 @@ const novelManager = {
     },
 
     async listChapterVersions(novelId, chapterNum) {
-        const chapterId = `${novelId}_ch${chapterNum}`;
-        const all = await db.getAll('versions', 'chapterId', chapterId);
+        // 版本挂在章节的真实 id 上（archiveChapterVersion 用的是 chapter.id），
+        // 所以这里也要先定位到真实 id，不能直接拼 `${novelId}_ch${n}`
+        const found = await this.findChapterKey(novelId, chapterNum);
+        const all = await db.getAll('versions', 'chapterId', found.id);
         return all.sort((a, b) => (b.created || 0) - (a.created || 0));
     },
 
@@ -2038,7 +2050,6 @@ function restoreChatSessionId() {
 // 把消息画进聊天区（隐藏欢迎页与快捷卡片）
 function paintChatMessages(container, msgs) {
     if (!container) return;
-    store.chatMessages = msgs;
     const hero = container.querySelector('.chat-hero');
     const actionList = container.querySelector('.chat-action-list');
     const messagesBox = container.querySelector('#chat-messages');
@@ -6488,7 +6499,6 @@ async function renderChatDrawer() {
 
 function startNewChatSession() {
     rememberChatSession('chat_' + Date.now());
-    store.chatMessages = [];
     store.activeChatSkill = null;
     closeChatDrawer();
     navigateTo('chat');
@@ -6522,8 +6532,7 @@ async function deleteChatSession(sessionId) {
         // 如果删除的是当前会话，重置
         if (store.currentSessionId === sessionId) {
             rememberChatSession('chat_' + Date.now());
-            store.chatMessages = [];
-        }
+                }
         
         ui.showToast('会话已删除');
         renderChatDrawer();
