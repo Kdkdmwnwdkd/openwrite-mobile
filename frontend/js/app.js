@@ -6,7 +6,7 @@
 
 // ===== Configuration =====
 const CONFIG = {
-    VERSION: '2.21.0',   // 与 package.json 保持一致
+    VERSION: '2.21.1',   // 与 package.json 保持一致
     APP_NAME: 'OpenWrite',
     DB_NAME: 'OpenWriteDB',
     DB_VERSION: 8
@@ -3049,7 +3049,10 @@ async function renderNovelDetail(container, novelId) {
         // 大纲兼容两种格式：旧版扁数组 + 树形大纲（outlineEditor/saveOutline 存的是树）
         // 此前只按扁数组读，保存过树形大纲的作品进详情页直接「outlineItems.map is not a function」
         const outlineItems = getFlatOutlineItems(novel);
-        const characters = novel.characters || [];
+        // 角色以前内嵌在 novel 记录里，后来统一到 characters 表。
+        // 先读表，表里没有才回退到旧字段 —— 否则老作品进详情页资料区是空的。
+        const tableChars = await novelManager.listCharacters(novelId).catch(() => []);
+        const characters = tableChars.length ? tableChars : (novel.characters || []);
         const volumes = await novelManager.listVolumes(novelId);
         
         container.innerHTML = `
@@ -4811,24 +4814,42 @@ ${given.join('\n')}
 }
 
 async function guideConfirmCreate(plan, title) {
+    const answers = (novelGuideState && novelGuideState.answers) || {};
     try {
-        const novel = await novelManager.create(title || plan.title, plan.worldbuilding || '', '');
-        
-        // 保存大纲和角色
-        if (plan.outline) {
-            novel.outline = plan.outline;
-        }
-        if (plan.characters) {
-            novel.characters = plan.characters.map(c => ({
-                id: 'char_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
-                name: c.name,
-                charName: c.name,
-                role: c.role,
-                description: c.description,
-                novelId: novel.id
-            }));
-        }
+        // 类型是用户在第一步亲口说的，之前建书时传的是空串 —— 书架分类标签一直是空的
+        const novel = await novelManager.create(
+            title || plan.title,
+            plan.synopsis || '',        // 简介放梗概，不是世界观（原来整段世界观被塞进简介）
+            answers.genre || ''
+        );
+
+        if (plan.outline) novel.outline = plan.outline;
         await novelManager.update(novel);
+
+        // 角色要写进 characters 表：角色卡页、详情页的资料区读的都是这张表。
+        // 以前只塞进 novel.characters 内嵌数组，引导建完书去「角色」页是「暂无角色」。
+        for (const c of (plan.characters || [])) {
+            if (!c || !c.name) continue;
+            try {
+                await novelManager.createCharacter(novel.id, {
+                    name: c.name,
+                    role: c.role || '',
+                    description: c.description || '',
+                    personality: c.description || ''
+                });
+            } catch (_) { /* 单个角色失败不影响建书 */ }
+        }
+
+        // 世界观同理，之前整段文字塞在简介里，世界观库是空的
+        if (plan.worldbuilding) {
+            try {
+                await novelManager.createWorldbuilding(novel.id, {
+                    title: '世界观',
+                    category: 'other',
+                    content: String(plan.worldbuilding)
+                });
+            } catch (_) { /* 同上 */ }
+        }
         
         addChatMessage('ai', `✅ 小说《${title || plan.title}》已创建！\n\n接下来想做什么？`, [
             { label: '✍️ 直接写第1章', action: () => { novelGuideState = null; navigateTo('chapterEdit', { novelId: novel.id, chapterNum: 1 }); } },

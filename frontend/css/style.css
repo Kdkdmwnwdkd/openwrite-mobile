@@ -5453,3 +5453,15 @@ body.focus-mode .editor-content { color: var(--text); caret-color: var(--primary
     font-size: 12.5px;
     border-radius: 999px;
 }
+
+/* 角色卡两列在窄屏会溢出：grid 的 1fr 默认 min-width:auto，
+   卡片内容撑开就把第二列推出屏幕。 */
+.character-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.character-card { min-width: 0; }
+.character-card .character-info { min-width: 0; flex: 1; }
+.character-card .character-name,
+.character-card .character-meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
